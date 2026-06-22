@@ -22,9 +22,9 @@
         <div class="panel compact key-panel">
           <div class="mini-title">0. 设置 DeepSeek</div>
           <label for="apiKey">DeepSeek API Key</label>
-          <input id="apiKey" type="password" placeholder="粘贴你的 API Key" />
+          <input id="apiKey" type="password" placeholder="服务端未配置时再临时粘贴" />
           <div id="apiKeyStatus" class="step-state wait">未填写</div>
-          <div class="hint">Key 只保存在当前浏览器；服务端不会写入文件。</div>
+          <div class="hint">优先使用服务端 API。临时粘贴的 Key 只保存在当前浏览器，不写入项目文件。</div>
           <label class="checkbox">
             <input id="mockRun" type="checkbox" />
             模拟运行，不消耗 API
@@ -42,7 +42,7 @@
         <section class="topbar">
           <div>
             <h2 id="projectTitle">请选择或新建项目</h2>
-            <p id="projectSubtitle">从左侧开始：填 Key → 建项目 → 上传 Review → 按顺序点击每一步。</p>
+            <p id="projectSubtitle">从左侧开始：确认 API → 建项目 → 上传 Review → 按顺序点击每一步。</p>
           </div>
           <div class="top-actions">
             <button id="refreshBtn">刷新状态</button>
@@ -67,7 +67,7 @@
             <strong id="mReviews">0</strong>
           </div>
           <div class="metric">
-            <span>批次数</span>
+            <span>后台批次</span>
             <strong id="mBatches">0</strong>
           </div>
           <div class="metric">
@@ -107,7 +107,7 @@
               <input id="projectCategory" placeholder="例如：键盘 / 马克笔本 / 收纳盒" />
             </label>
             <label>
-              每批评论数
+              后台处理数量（默认即可）
               <input id="batchSize" type="number" min="5" max="100" value="25" />
             </label>
           </div>
@@ -145,30 +145,16 @@
             <button id="uploadBtn">上传 Review</button>
           </div>
           <div id="uploadPreview" class="preview compact-preview"></div>
-        </section>
-
-        <section class="step-card" id="stepBatches">
-          <div class="step-head">
-            <div class="step-no">3</div>
-            <div>
-              <h3>生成批次</h3>
-              <p class="hint">批次越小越稳，批次越大越快。正式跑建议先用 25-50 条一批观察结果。</p>
-            </div>
-            <div id="sBatches" class="step-state wait">未完成</div>
-          </div>
-          <div class="action-row">
-            <button id="makeBatchesBtn">按当前批次大小生成批次</button>
-            <span id="batchHint" class="hint">导入 Review 后点击。</span>
-          </div>
-          <details class="details-box" open>
-            <summary>查看批次明细和单批操作</summary>
+          <details class="details-box">
+            <summary>后台处理状态（通常不用看）</summary>
+            <p class="hint">系统会在上传后自动拆成后台任务，只是为了防止长 Review 调用超时，不是业务分组。</p>
             <div id="batchTable" class="table-wrap"></div>
           </details>
         </section>
 
         <section class="step-card" id="stepAtomic">
           <div class="step-head">
-            <div class="step-no">4</div>
+            <div class="step-no">3</div>
             <div>
               <h3>提取原子标签</h3>
               <p class="hint">这一步让 AI 逐条读原文，只拆最小语义事实，不直接下最终维度结论。</p>
@@ -193,7 +179,7 @@
 
         <section class="step-card" id="stepDimensions">
           <div class="step-head">
-            <div class="step-no">5</div>
+            <div class="step-no">4</div>
             <div>
               <h3>生成维度草案</h3>
               <p class="hint">AI 会把原子标签归纳成购买决策维度和 Context 字段。这里是草案，不是最终规则。</p>
@@ -209,7 +195,7 @@
 
         <section class="step-card" id="stepLock">
           <div class="step-head">
-            <div class="step-no">6</div>
+            <div class="step-no">5</div>
             <div>
               <h3>人工确认并锁定规则</h3>
               <p class="hint">确认维度名称、定义、P/N/M/0 边界没有明显问题后，再保存。最终打标只按锁定规则跑。</p>
@@ -228,7 +214,7 @@
 
         <section class="step-card" id="stepFinal">
           <div class="step-head">
-            <div class="step-no">7</div>
+            <div class="step-no">6</div>
             <div>
               <h3>最终打标并导出</h3>
               <p class="hint">这一步会按锁定维度逐条给 Review 打 P/N/M/0、Context 和证据。完成后下载 Excel。</p>
