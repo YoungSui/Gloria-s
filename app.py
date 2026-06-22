@@ -973,6 +973,16 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/health":
             send_json(self, {"ok": True, "time": now_iso()})
             return
+        if path == "/api/config":
+            send_json(
+                self,
+                {
+                    "has_deepseek_key": bool(os.environ.get("DEEPSEEK_API_KEY", "")),
+                    "fast_model": DEFAULT_FAST_MODEL,
+                    "accurate_model": DEFAULT_ACCURATE_MODEL,
+                },
+            )
+            return
         if path == "/api/projects":
             projects = load_projects()
             enriched = [{**p, "stats": project_stats(p["id"])} for p in projects]
