@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VOC 语义打标工具</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">VOC</div>
+          <div>
+            <h1>语义打标工具</h1>
+            <p>按步骤跑，不需要懂技术</p>
+          </div>
+        </div>
+
+        <button id="newProjectBtn" class="primary full">新建一个分析项目</button>
+
+        <div class="panel compact key-panel">
+          <div class="mini-title">0. 设置 DeepSeek</div>
+          <label for="apiKey">DeepSeek API Key</label>
+          <input id="apiKey" type="password" placeholder="粘贴你的 API Key" />
+          <div id="apiKeyStatus" class="step-state wait">未填写</div>
+          <div class="hint">Key 只保存在当前浏览器；服务端不会写入文件。</div>
+          <label class="checkbox">
+            <input id="mockRun" type="checkbox" />
+            模拟运行，不消耗 API
+          </label>
+          <div class="hint">正式打标时取消勾选。</div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="mini-title">项目列表</div>
+          <div class="project-list" id="projectList"></div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="topbar">
+          <div>
+            <h2 id="projectTitle">请选择或新建项目</h2>
+            <p id="projectSubtitle">从左侧开始：填 Key → 建项目 → 上传 Review → 按顺序点击每一步。</p>
+          </div>
+          <div class="top-actions">
+            <button id="refreshBtn">刷新状态</button>
+            <a id="exportLink" class="button primary disabled" href="#">下载最终 Excel</a>
+          </div>
+        </section>
+
+        <section class="workflow-card">
+          <div class="panel-head tight">
+            <div>
+              <h3>操作顺序</h3>
+              <p class="hint">只要按从左到右的顺序完成即可。绿色代表已完成，蓝色代表下一步。</p>
+            </div>
+            <div id="nextAction" class="next-action">下一步：填写 API Key 或勾选模拟运行</div>
+          </div>
+          <div id="flowSteps" class="flow-steps"></div>
+        </section>
+
+        <section class="cards six">
+          <div class="metric">
+            <span>评论数</span>
+            <strong id="mReviews">0</strong>
+          </div>
+          <div class="metric">
+            <span>批次数</span>
+            <strong id="mBatches">0</strong>
+          </div>
+          <div class="metric">
+            <span>原子标签</span>
+            <strong id="mAtomic">0</strong>
+          </div>
+          <div class="metric">
+            <span>锁定规则</span>
+            <strong id="mLocked">0</strong>
+          </div>
+          <div class="metric">
+            <span>已最终打标</span>
+            <strong id="mFinal">0</strong>
+          </div>
+          <div class="metric warn">
+            <span>需复核</span>
+            <strong id="mNeedReview">0</strong>
+          </div>
+        </section>
+
+        <section class="step-card" id="stepProject">
+          <div class="step-head">
+            <div class="step-no">1</div>
+            <div>
+              <h3>建立项目</h3>
+              <p class="hint">告诉系统你要分析什么产品。品类背景写得越清楚，后面越不容易跑偏。</p>
+            </div>
+            <div id="sProject" class="step-state wait">未完成</div>
+          </div>
+          <div class="form-grid three">
+            <label>
+              产品名称
+              <input id="projectName" placeholder="例如：三键区蓝牙键盘" />
+            </label>
+            <label>
+              产品品类
+              <input id="projectCategory" placeholder="例如：键盘 / 马克笔本 / 收纳盒" />
+            </label>
+            <label>
+              每批评论数
+              <input id="batchSize" type="number" min="5" max="100" value="25" />
+            </label>
+          </div>
+          <div class="form-grid two">
+            <label>
+              快速模型，用于原子标签
+              <input id="fastModel" value="deepseek-v4-flash" />
+            </label>
+            <label>
+              高质量模型，用于维度和最终打标
+              <input id="accurateModel" value="deepseek-v4-pro" />
+            </label>
+          </div>
+          <label>
+            品类背景和误判边界
+            <textarea id="projectDescription" rows="4" placeholder="例如：产品形态、核心场景、不要把售后/物流/包装误判成产品性能"></textarea>
+          </label>
+          <div class="action-row">
+            <button id="createProjectBtn" class="primary">创建项目并进入下一步</button>
+            <span class="hint">已有项目时，可直接从左侧项目列表选择。</span>
+          </div>
+        </section>
+
+        <section class="step-card" id="stepUpload">
+          <div class="step-head">
+            <div class="step-no">2</div>
+            <div>
+              <h3>导入 Review</h3>
+              <p class="hint">支持 .xlsx / .csv。系统会识别标题、正文、星级、型号、ReviewID、链接等常见字段。</p>
+            </div>
+            <div id="sUpload" class="step-state wait">未完成</div>
+          </div>
+          <div class="file-row">
+            <input id="reviewFile" type="file" accept=".xlsx,.csv" />
+            <button id="uploadBtn">上传 Review</button>
+          </div>
+          <div id="uploadPreview" class="preview compact-preview"></div>
+        </section>
+
+        <section class="step-card" id="stepBatches">
+          <div class="step-head">
+            <div class="step-no">3</div>
+            <div>
+              <h3>生成批次</h3>
+              <p class="hint">批次越小越稳，批次越大越快。正式跑建议先用 25-50 条一批观察结果。</p>
+            </div>
+            <div id="sBatches" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="makeBatchesBtn">按当前批次大小生成批次</button>
+            <span id="batchHint" class="hint">导入 Review 后点击。</span>
+          </div>
+          <details class="details-box" open>
+            <summary>查看批次明细和单批操作</summary>
+            <div id="batchTable" class="table-wrap"></div>
+          </details>
+        </section>
+
+        <section class="step-card" id="stepAtomic">
+          <div class="step-head">
+            <div class="step-no">4</div>
+            <div>
+              <h3>提取原子标签</h3>
+              <p class="hint">这一步让 AI 逐条读原文，只拆最小语义事实，不直接下最终维度结论。</p>
+            </div>
+            <div id="sAtomic" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="runAllAtomicBtn" class="primary">提取全部待处理批次</button>
+            <span class="hint">正式运行会消耗 DeepSeek API；模拟运行只测流程。</span>
+          </div>
+          <div class="grid two compact-grid">
+            <div>
+              <div class="mini-title">最近原子标签</div>
+              <div id="atomicPreview" class="preview tall"></div>
+            </div>
+            <div>
+              <div class="mini-title">候选原子池</div>
+              <div id="dimensionPool" class="pool tall"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="step-card" id="stepDimensions">
+          <div class="step-head">
+            <div class="step-no">5</div>
+            <div>
+              <h3>生成维度草案</h3>
+              <p class="hint">AI 会把原子标签归纳成购买决策维度和 Context 字段。这里是草案，不是最终规则。</p>
+            </div>
+            <div id="sDraft" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="proposeDimensionsBtn" class="primary">生成维度草案</button>
+            <span class="hint">生成后先看下面的可读卡片，不需要直接看 JSON。</span>
+          </div>
+          <div id="dimensionCards" class="dimension-cards"></div>
+        </section>
+
+        <section class="step-card" id="stepLock">
+          <div class="step-head">
+            <div class="step-no">6</div>
+            <div>
+              <h3>人工确认并锁定规则</h3>
+              <p class="hint">确认维度名称、定义、P/N/M/0 边界没有明显问题后，再保存。最终打标只按锁定规则跑。</p>
+            </div>
+            <div id="sLock" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="saveDimensionsBtn" class="primary">确认无误，保存为锁定规则</button>
+            <span class="hint">需要精修时打开下方高级编辑。</span>
+          </div>
+          <details class="details-box">
+            <summary>高级编辑：直接修改维度规则 JSON</summary>
+            <textarea id="dimensionJson" class="json-editor" rows="16" placeholder="维度草案会显示在这里，可人工修改后保存"></textarea>
+          </details>
+        </section>
+
+        <section class="step-card" id="stepFinal">
+          <div class="step-head">
+            <div class="step-no">7</div>
+            <div>
+              <h3>最终打标并导出</h3>
+              <p class="hint">这一步会按锁定维度逐条给 Review 打 P/N/M/0、Context 和证据。完成后下载 Excel。</p>
+            </div>
+            <div id="sFinal" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="runAllFinalBtn" class="primary">最终打标全部待处理批次</button>
+            <a id="exportLinkBottom" class="button ghost disabled" href="#">下载最终 Excel</a>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="logDialog">
+      <pre id="logText"></pre>
+      <button onclick="document.getElementById('logDialog').close()">关闭</button>
+    </dialog>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
