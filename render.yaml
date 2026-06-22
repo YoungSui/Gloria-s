@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: voc-semantic-labeler
+    env: docker
+    autoDeploy: false
+    disk:
+      name: voc-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: VOC_HOST
+        value: 0.0.0.0
+      - key: VOC_DATA_DIR
+        value: /var/data/data
+      - key: VOC_EXPORT_DIR
+        value: /var/data/exports
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_FAST_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_ACCURATE_MODEL
+        value: deepseek-v4-pro
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: VOC_ACCESS_CODE
+        sync: false
