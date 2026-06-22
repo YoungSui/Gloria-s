@@ -2,6 +2,7 @@ let state = {
   projects: [],
   currentProjectId: null,
   currentProject: null,
+  config: { has_deepseek_key: false },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -10,12 +11,11 @@ const FLOW_LABELS = [
   ["api", "0", "设置 API"],
   ["project", "1", "建项目"],
   ["upload", "2", "导入 Review"],
-  ["batches", "3", "生成批次"],
-  ["atomic", "4", "原子标签"],
-  ["draft", "5", "维度草案"],
-  ["lock", "6", "锁定规则"],
-  ["final", "7", "最终打标"],
-  ["export", "8", "导出 Excel"],
+  ["atomic", "3", "原子标签"],
+  ["draft", "4", "维度草案"],
+  ["lock", "5", "锁定规则"],
+  ["final", "6", "最终打标"],
+  ["export", "7", "导出 Excel"],
 ];
 
 function apiKey() {
@@ -56,6 +56,7 @@ function formatNum(value) {
 }
 
 async function loadProjects() {
+  state.config = await request("/api/config");
   const data = await request("/api/projects");
   state.projects = data.projects || [];
   renderProjectList();
@@ -101,12 +102,11 @@ function renderProjectList() {
 
 function renderEmpty() {
   $("projectTitle").textContent = "请选择或新建项目";
-  $("projectSubtitle").textContent = "从左侧开始：填 Key → 建项目 → 上传 Review → 按顺序点击每一步。";
+  $("projectSubtitle").textContent = "从左侧开始：确认 API → 建项目 → 上传 Review → 按顺序点击每一步。";
   renderMetrics({});
   renderWorkflow(null);
   setStepState("sProject", false, "未完成");
   setStepState("sUpload", false, "未完成");
-  setStepState("sBatches", false, "未完成");
   setStepState("sAtomic", false, "未完成");
   setStepState("sDraft", false, "未完成");
   setStepState("sLock", false, "未完成");
@@ -148,7 +148,7 @@ function renderMetrics(stats) {
 }
 
 function hasApiReady() {
-  return Boolean(apiKey()) || Boolean($("mockRun")?.checked);
+  return Boolean(state.config?.has_deepseek_key) || Boolean(apiKey()) || Boolean($("mockRun")?.checked);
 }
 
 function renderApiKeyStatus() {
@@ -156,7 +156,9 @@ function renderApiKeyStatus() {
   const mock = Boolean($("mockRun")?.checked);
   const el = $("apiKeyStatus");
   if (!el) return;
-  el.textContent = mock ? "模拟运行已开启" : ready ? "已填写" : "未填写";
+  $("apiKey").disabled = Boolean(state.config?.has_deepseek_key);
+  $("apiKey").placeholder = state.config?.has_deepseek_key ? "服务端已配置，不需要填写" : "服务端未配置时再临时粘贴";
+  el.textContent = state.config?.has_deepseek_key ? "已接入服务端 API" : mock ? "模拟运行已开启" : ready ? "已填写临时 Key" : "未填写";
   el.className = `step-state ${ready ? "done" : "wait"}`;
 }
 
@@ -170,7 +172,6 @@ function stepState(data) {
     api: hasApiReady(),
     project: Boolean(data?.project),
     upload: reviewCount > 0,
-    batches: (stats.batches || 0) > 0,
     atomic: (stats.atomic_records || 0) > 0,
     draft: hasDraft,
     lock: hasLocked,
@@ -198,20 +199,17 @@ function renderWorkflow(data) {
 
   setStepState("sProject", stateMap.project, stateMap.project ? "已创建" : "未完成", firstOpen?.[0] === "project");
   setStepState("sUpload", stateMap.upload, stateMap.upload ? `已导入 ${formatNum(data?.project?.stats?.reviews)} 条` : "未完成", firstOpen?.[0] === "upload");
-  setStepState("sBatches", stateMap.batches, stateMap.batches ? `已生成 ${formatNum(data?.project?.stats?.batches)} 批` : "未完成", firstOpen?.[0] === "batches");
   setStepState("sAtomic", stateMap.atomic, stateMap.atomic ? `已提取 ${formatNum(data?.project?.stats?.atomic_records)} 个` : "未完成", firstOpen?.[0] === "atomic");
   setStepState("sDraft", stateMap.draft, stateMap.draft ? "已有草案" : "未完成", firstOpen?.[0] === "draft");
   setStepState("sLock", stateMap.lock, stateMap.lock ? "已锁定" : "未完成", firstOpen?.[0] === "lock");
   setStepState("sFinal", stateMap.final, stateMap.final ? "已完成" : (data?.project?.stats?.final_labeled ? `已打 ${formatNum(data.project.stats.final_labeled)} 条` : "未完成"), firstOpen?.[0] === "final");
-  $("batchHint").textContent = stateMap.upload ? "导入后可重新生成批次，会覆盖原批次划分。" : "导入 Review 后点击。";
 }
 
 function nextActionText(key) {
   const map = {
-    api: "下一步：填写 DeepSeek API Key，或勾选模拟运行",
+    api: "下一步：等待服务端 API 接入，或临时填写 DeepSeek API Key",
     project: "下一步：创建项目",
     upload: "下一步：上传 Review 文件",
-    batches: "下一步：生成批次",
     atomic: "下一步：提取原子标签",
     draft: "下一步：生成维度草案",
     lock: "下一步：检查草案并锁定规则",
@@ -234,14 +232,14 @@ function renderBatches(batches) {
     return;
   }
   if (!batches.length) {
-    $("batchTable").innerHTML = `<div class="hint" style="padding:12px">还没有批次。导入 Review 后点击“生成批次”。</div>`;
+    $("batchTable").innerHTML = `<div class="hint" style="padding:12px">还没有后台处理批次。上传 Review 后系统会自动生成。</div>`;
     return;
   }
   $("batchTable").innerHTML = `
     <table>
       <thead>
         <tr>
-          <th>批次</th><th>序号范围</th><th>评论数</th><th>状态</th><th>模型</th><th>错误/提示</th><th>操作</th>
+          <th>后台批次</th><th>序号范围</th><th>评论数</th><th>状态</th><th>模型</th><th>错误/提示</th><th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -254,8 +252,8 @@ function renderBatches(batches) {
             <td>${escapeHtml(b.model || "")}</td>
             <td>${escapeHtml(b.error || "")}</td>
             <td>
-              <button data-batch="${b.id}" class="run-batch">提取原子标签</button>
-              <button data-batch="${b.id}" class="final-batch">最终打标</button>
+              <button data-batch="${b.id}" class="run-batch">单批原子提取</button>
+              <button data-batch="${b.id}" class="final-batch">单批最终打标</button>
             </td>
           </tr>
         `).join("")}
@@ -401,26 +399,27 @@ async function uploadReviews() {
   form.append("file", file);
   const data = await request(`/api/projects/${state.currentProjectId}/reviews`, { method: "POST", body: form });
   $("uploadPreview").innerHTML = `
-    <div class="hint">已导入 ${formatNum(data.stats.reviews)} 条评论。</div>
+    <div class="hint">已导入 ${formatNum(data.stats.reviews)} 条评论。系统正在自动准备后台任务，不需要手动分组。</div>
     ${(data.sample || []).map((r) => `<div class="tag-row"><strong>${escapeHtml(r.review_id)}</strong><small>${escapeHtml((r.review_original || "").slice(0, 160))}</small></div>`).join("")}
   `;
+  await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: Number($("batchSize").value || 25) } });
   await loadProjects();
-  document.getElementById("stepBatches").scrollIntoView({ behavior: "smooth", block: "start" });
+  document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-async function makeBatches() {
+async function makeBatches(options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const size = Number($("batchSize").value || 25);
   await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: size } });
   await loadProject(state.currentProjectId);
-  document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!options.silent) document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function runBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const key = apiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key) throw new Error("请输入 DeepSeek API Key，或勾选模拟运行");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const btn = document.querySelector(`.run-batch[data-batch="${batchId}"]`);
   if (btn) {
     btn.disabled = true;
@@ -443,7 +442,7 @@ async function runFinalBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const key = apiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key) throw new Error("请输入 DeepSeek API Key，或勾选模拟运行");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const btn = document.querySelector(`.final-batch[data-batch="${batchId}"]`);
   if (btn) {
     btn.disabled = true;
@@ -466,7 +465,7 @@ async function proposeDimensions() {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const key = apiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key) throw new Error("请输入 DeepSeek API Key，或勾选模拟运行");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const data = await request(`/api/projects/${state.currentProjectId}/propose-dimensions`, {
     method: "POST",
     json: { model: $("accurateModel").value.trim() || "deepseek-v4-pro", mock },
@@ -501,17 +500,17 @@ async function runAllAtomic() {
   for (const b of pending) {
     await runBatch(b.id, { silent: true });
   }
-  showLog(`已完成 ${pending.length} 个批次的原子提取。`);
+  showLog(`已完成 ${pending.length} 个后台批次的原子提取。`);
 }
 
 async function runAllFinal() {
   const batches = state.currentProject?.batches || [];
   const pending = batches.filter((b) => !["final_done", "final_done_with_warnings"].includes(b.status));
-  if (!pending.length) throw new Error("没有待处理的最终打标批次");
+  if (!pending.length) throw new Error("没有待处理的最终打标后台批次");
   for (const b of pending) {
     await runFinalBatch(b.id, { silent: true });
   }
-  showLog(`已完成 ${pending.length} 个批次的最终打标。`);
+  showLog(`已完成 ${pending.length} 个后台批次的最终打标。`);
 }
 
 function escapeHtml(value) {
@@ -539,7 +538,7 @@ function bindEvents() {
   $("refreshBtn").addEventListener("click", () => loadProjects().catch(showLog));
   $("createProjectBtn").addEventListener("click", () => createProject().catch(showLog));
   $("uploadBtn").addEventListener("click", () => uploadReviews().catch(showLog));
-  $("makeBatchesBtn").addEventListener("click", () => makeBatches().catch(showLog));
+  if ($("makeBatchesBtn")) $("makeBatchesBtn").addEventListener("click", () => makeBatches().catch(showLog));
   $("runAllAtomicBtn").addEventListener("click", () => runAllAtomic().catch(showLog));
   $("runAllFinalBtn").addEventListener("click", () => runAllFinal().catch(showLog));
   $("proposeDimensionsBtn").addEventListener("click", () => proposeDimensions().catch(showLog));
