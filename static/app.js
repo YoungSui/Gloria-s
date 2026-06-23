@@ -15,7 +15,8 @@ const FLOW_LABELS = [
   ["draft", "4", "维度草案"],
   ["lock", "5", "锁定规则"],
   ["final", "6", "最终打标"],
-  ["export", "7", "导出 Excel"],
+  ["analysis", "7", "细分洞察"],
+  ["export", "8", "导出 Excel"],
 ];
 
 function apiKey() {
@@ -126,10 +127,13 @@ function renderEmpty() {
   setStepState("sDraft", false, "未完成");
   setStepState("sLock", false, "未完成");
   setStepState("sFinal", false, "未完成");
+  setStepState("sAnalysis", false, "未完成");
   $("batchTable").innerHTML = "";
   $("dimensionPool").innerHTML = "";
   $("dimensionCards").innerHTML = `<div class="empty-box">完成原子标签后，再生成维度草案。</div>`;
   $("atomicPreview").innerHTML = "";
+  $("needReviewPanel").innerHTML = "";
+  $("analysisPreview").innerHTML = "";
   $("dimensionJson").value = "";
   $("exportLink").classList.add("disabled");
   $("exportLinkBottom").classList.add("disabled");
@@ -142,15 +146,17 @@ function renderProject(data) {
   $("projectSubtitle").textContent = `${p.category || "未填写品类"} · ${p.stage} · 更新于 ${p.updated_at}`;
   renderMetrics(stats);
   $("exportLink").href = `/api/projects/${p.id}/export`;
-  $("exportLink").classList.toggle("disabled", !stats.reviews);
+  $("exportLink").classList.toggle("disabled", !(stats.final_labeled > 0));
   $("exportLinkBottom").href = `/api/projects/${p.id}/export`;
-  $("exportLinkBottom").classList.toggle("disabled", !stats.reviews);
+  $("exportLinkBottom").classList.toggle("disabled", !(stats.final_labeled > 0));
   renderWorkflow(data);
   renderBatches(data.batches || []);
   renderDimensionEditor(data);
   renderDimensionCards(data);
   renderDimensionPool(data.dimension_candidates || {});
   renderAtomicPreview(data.atomic_results || []);
+  renderNeedReviewPanel(data.need_review_items || []);
+  renderAnalysisPreview(data.analysis_summary || {});
 }
 
 function renderMetrics(stats) {
@@ -187,6 +193,7 @@ function stepState(data) {
   const hasLocked = Boolean((data?.locked_dimensions?.decision_dimensions || []).length || (data?.locked_dimensions?.context_fields || []).length);
   const reviewCount = stats.reviews || 0;
   const finalCount = stats.final_labeled || 0;
+  const hasAnalysis = Boolean(stats.analysis_ready);
   return {
     api: hasApiReady(),
     project: Boolean(data?.project),
@@ -195,6 +202,7 @@ function stepState(data) {
     draft: hasDraft,
     lock: hasLocked,
     final: reviewCount > 0 && finalCount >= reviewCount,
+    analysis: hasAnalysis,
     export: reviewCount > 0 && finalCount > 0,
   };
 }
@@ -222,6 +230,7 @@ function renderWorkflow(data) {
   setStepState("sDraft", stateMap.draft, stateMap.draft ? "已有草案" : "未完成", firstOpen?.[0] === "draft");
   setStepState("sLock", stateMap.lock, stateMap.lock ? "已锁定" : "未完成", firstOpen?.[0] === "lock");
   setStepState("sFinal", stateMap.final, stateMap.final ? "已完成" : (data?.project?.stats?.final_labeled ? `已打 ${formatNum(data.project.stats.final_labeled)} 条` : "未完成"), firstOpen?.[0] === "final");
+  setStepState("sAnalysis", stateMap.analysis, stateMap.analysis ? "已生成" : "未完成", firstOpen?.[0] === "analysis");
 }
 
 function nextActionText(key) {
@@ -233,6 +242,7 @@ function nextActionText(key) {
     draft: "下一步：生成维度草案",
     lock: "下一步：检查草案并锁定规则",
     final: "下一步：最终打标全部待处理批次",
+    analysis: "下一步：生成细分维度与优化切入口",
     export: "下一步：下载最终 Excel",
   };
   return key ? map[key] : "全部步骤已完成，可以下载最终 Excel";
@@ -314,8 +324,11 @@ function renderDimensionCards(data) {
   const draft = data.dimension_model || {};
   const lockedReady = Boolean((locked.decision_dimensions || []).length || (locked.context_fields || []).length);
   const source = lockedReady ? locked : draft;
-  const decision = source.decision_dimensions || [];
-  const context = source.context_fields || [];
+  const statSource = chooseDimensionStats(data.dimension_stats);
+  const decisionStats = statsMap(statSource.decision || []);
+  const contextStats = statsMap(statSource.context || []);
+  const decision = sortByStats(source.decision_dimensions || [], decisionStats);
+  const context = sortByStats(source.context_fields || [], contextStats);
   const questions = source.need_human_decisions || [];
   if (!decision.length && !context.length) {
     $("dimensionCards").innerHTML = `<div class="empty-box">还没有维度草案。先完成原子标签，再点击“生成维度草案”。</div>`;
@@ -325,27 +338,61 @@ function renderDimensionCards(data) {
     <div class="dimension-toolbar">
       <span class="step-state ${lockedReady ? "done" : "active"}">${lockedReady ? "当前为锁定规则" : "当前为草案，需人工确认"}</span>
       <span class="hint">购买决策维度 ${decision.length} 个 · Context 字段 ${context.length} 个</span>
+      <span class="hint">${escapeHtml(statSource.sort_basis || "按提及 Review 数降序展示")}</span>
     </div>
     <div class="dimension-section-title">购买决策维度</div>
     <div class="dimension-grid">
-      ${decision.map((item) => dimensionCard(item, "decision")).join("")}
+      ${decision.map((item) => dimensionCard(item, "decision", decisionStats[item.name_zh || ""])).join("")}
     </div>
     <div class="dimension-section-title">Context 字段</div>
     <div class="dimension-grid">
-      ${context.map((item) => dimensionCard(item, "context")).join("")}
+      ${context.map((item) => dimensionCard(item, "context", contextStats[item.name_zh || ""])).join("")}
     </div>
     ${questions.length ? `<div class="review-questions"><strong>需要人工判断：</strong>${questions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
   `;
 }
 
-function dimensionCard(item, type) {
+function chooseDimensionStats(allStats = {}) {
+  const finalDecision = allStats.final?.decision || [];
+  const finalContext = allStats.final?.context || [];
+  const hasFinal = finalDecision.some((x) => x.mention_count > 0) || finalContext.some((x) => x.mention_count > 0);
+  const block = hasFinal ? allStats.final : allStats.source || {};
+  const sample = (block.decision || block.context || [])[0] || {};
+  return { ...block, sort_basis: sample.sort_basis || (hasFinal ? "按最终打标提及 Review 数降序" : "按来源原子标签覆盖 Review 数降序") };
+}
+
+function statsMap(rows) {
+  return Object.fromEntries((rows || []).map((x) => [x.name_zh || "", x]));
+}
+
+function sortByStats(items, map) {
+  return [...items].sort((a, b) => {
+    const aa = map[a.name_zh || ""]?.mention_count || 0;
+    const bb = map[b.name_zh || ""]?.mention_count || 0;
+    return bb - aa || String(a.name_zh || "").localeCompare(String(b.name_zh || ""), "zh-CN");
+  });
+}
+
+function formatRate(value) {
+  return `${((Number(value) || 0) * 100).toFixed(1)}%`;
+}
+
+function dimensionCard(item, type, stat = {}) {
   const title = item.name_zh || "未命名";
   const definition = item.definition_zh || "";
   const pOrEvidence = type === "decision" ? item.p_rule_zh : item.evidence_required_zh;
   const listingUse = type === "decision" ? item.listing_use_zh : item.analysis_use_zh;
+  const pmn = type === "decision" && (stat.p_count || stat.n_count || stat.m_count)
+    ? `<span>P ${formatNum(stat.p_count)}</span><span>N ${formatNum(stat.n_count)}</span><span>M ${formatNum(stat.m_count)}</span>`
+    : "";
   return `
     <article class="dimension-card">
       <h4>${escapeHtml(title)}</h4>
+      <div class="stat-strip">
+        <span>提及 ${formatNum(stat.mention_count)} 条</span>
+        <span>提及率 ${formatRate(stat.mention_rate)}</span>
+        ${pmn}
+      </div>
       <p>${escapeHtml(definition)}</p>
       <dl>
         <dt>${type === "decision" ? "正向规则" : "需要证据"}</dt>
@@ -393,6 +440,64 @@ function renderAtomicPreview(rows) {
     }
   }
   $("atomicPreview").innerHTML = html.join("") || `<div class="hint">批次完成但没有原子标签。</div>`;
+}
+
+function renderNeedReviewPanel(items) {
+  if (!items.length) {
+    $("needReviewPanel").innerHTML = `<div class="hint">当前没有 NeedReview 项。后续如果 AI 标出低置信或边界冲突，会显示在这里。</div>`;
+    return;
+  }
+  $("needReviewPanel").innerHTML = `
+    <div class="review-queue-head">
+      <strong>${items.length} 条需复核</strong>
+      <span class="hint">优先看“原因”和“证据”，必要时再展开原文。</span>
+    </div>
+    ${items.slice(0, 50).map((item) => `
+      <details class="review-item">
+        <summary>
+          <span class="status ${item.stage === "最终打标" ? "final_done_with_warnings" : "done_with_warnings"}">${escapeHtml(item.stage)}</span>
+          <strong>${escapeHtml(item.review_id || "")}</strong>
+          <span>${escapeHtml(item.reason || "")}</span>
+        </summary>
+        <div class="hint">证据：${escapeHtml(item.evidence || "无")}</div>
+        <div class="raw-review">${escapeHtml((item.review_original || "").slice(0, 700))}</div>
+      </details>
+    `).join("")}
+  `;
+}
+
+function renderAnalysisPreview(summary) {
+  if (!summary.generated_at) {
+    $("analysisPreview").innerHTML = `<div class="hint">完成最终打标后，点击按钮生成细分维度和优化切入口。</div>`;
+    return;
+  }
+  const decision = summary.decision_subdimensions || [];
+  const context = summary.context_subdimensions || [];
+  $("analysisPreview").innerHTML = `
+    <div class="hint">已生成：${escapeHtml(summary.generated_at)}。${escapeHtml(summary.basis || "")}</div>
+    <div class="analysis-grid">
+      <div>
+        <h4>购买决策细分 Top 10</h4>
+        ${decision.slice(0, 10).map((x) => `
+          <div class="analysis-row">
+            <strong>${escapeHtml(x.parent_dimension)}｜${escapeHtml(x.subdimension_zh)}</strong>
+            <small>提及 ${formatNum(x.mention_count)} 条 · ${formatRate(x.mention_rate)} · P ${formatNum(x.p_count)} / N ${formatNum(x.n_count)} / M ${formatNum(x.m_count)}</small>
+            <div>${escapeHtml(x.optimization_entry_zh || "")}</div>
+          </div>
+        `).join("") || `<div class="hint">暂无决策细分。</div>`}
+      </div>
+      <div>
+        <h4>Context 细分 Top 10</h4>
+        ${context.slice(0, 10).map((x) => `
+          <div class="analysis-row">
+            <strong>${escapeHtml(x.context_field)}｜${escapeHtml(x.subdimension_zh)}</strong>
+            <small>提及 ${formatNum(x.mention_count)} 条 · ${formatRate(x.mention_rate)}</small>
+            <div>${escapeHtml(x.analysis_use_zh || "")}</div>
+          </div>
+        `).join("") || `<div class="hint">暂无 Context 细分。</div>`}
+      </div>
+    </div>
+  `;
 }
 
 async function createProject() {
@@ -541,6 +646,22 @@ async function saveDimensions() {
   document.getElementById("stepFinal").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+async function unlockDimensions() {
+  if (!state.currentProjectId) throw new Error("请先选择项目");
+  const data = await request(`/api/projects/${state.currentProjectId}/unlock-dimensions`, { method: "POST", json: {} });
+  await loadProject(state.currentProjectId);
+  showLog(data.message || data);
+  document.getElementById("stepLock").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function generateAnalysis() {
+  if (!state.currentProjectId) throw new Error("请先选择项目");
+  const data = await request(`/api/projects/${state.currentProjectId}/analysis`, { method: "POST", json: {} });
+  await loadProject(state.currentProjectId);
+  showLog("已生成细分维度与优化切入口，下载 Excel 时会一起带出。");
+  document.getElementById("stepAnalysis").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 async function runAllAtomic() {
   const batches = state.currentProject?.batches || [];
   const pending = batches.filter((b) => !["done", "done_with_warnings", "final_done", "final_done_with_warnings"].includes(b.status));
@@ -559,6 +680,7 @@ async function runAllFinal() {
     await runFinalBatch(b.id, { silent: true });
   }
   showLog(`已完成 ${pending.length} 个后台批次的最终打标。`);
+  document.getElementById("stepAnalysis").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function escapeHtml(value) {
@@ -591,6 +713,8 @@ function bindEvents() {
   $("runAllFinalBtn").addEventListener("click", () => runAllFinal().catch(showLog));
   $("proposeDimensionsBtn").addEventListener("click", () => proposeDimensions().catch(showLog));
   $("saveDimensionsBtn").addEventListener("click", () => saveDimensions().catch(showLog));
+  $("unlockDimensionsBtn").addEventListener("click", () => unlockDimensions().catch(showLog));
+  $("generateAnalysisBtn").addEventListener("click", () => generateAnalysis().catch(showLog));
 }
 
 if (location.protocol === "file:") {
