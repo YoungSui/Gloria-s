@@ -88,6 +88,17 @@
           </div>
         </section>
 
+        <section class="step-card compact-step" id="reviewQueueCard">
+          <div class="step-head">
+            <div class="step-no small">!</div>
+            <div>
+              <h3>人工 NeedReview 复核清单</h3>
+              <p class="hint">只看 AI 标低置信、边界冲突或可能误判的内容。这里不是让你重新逐条分析全部 Review。</p>
+            </div>
+          </div>
+          <div id="needReviewPanel" class="review-queue"></div>
+        </section>
+
         <section class="step-card" id="stepProject">
           <div class="step-head">
             <div class="step-no">1</div>
@@ -204,8 +215,20 @@
           </div>
           <div class="action-row">
             <button id="saveDimensionsBtn" class="primary">确认无误，保存为锁定规则</button>
-            <span class="hint">需要精修时打开下方高级编辑。</span>
+            <button id="unlockDimensionsBtn" class="ghost">解除锁定并回到草案</button>
+            <span class="hint">没锁定前不要跑最终打标；不同意 AI 划分时，先按下方规则改草案。</span>
           </div>
+          <details class="details-box" open>
+            <summary>如果不同意 AI 的维度划分，怎么改</summary>
+            <div class="edit-rules">
+              <div><strong>改名：</strong>只改 <code>name_zh</code>，让名字更贴近业务语言。</div>
+              <div><strong>删除：</strong>删除不该成为一级维度的整段对象。</div>
+              <div><strong>合并：</strong>保留更准确的那个维度，把另一个维度的 <code>source_atomic_tags</code> 合进去，并同步改定义和边界。</div>
+              <div><strong>拆分：</strong>复制一段维度对象，分别改名称、定义、P/N/M/0 规则和来源原子标签。</div>
+              <div><strong>改边界：</strong>重点改 <code>p_rule_zh / n_rule_zh / m_rule_zh / zero_rule_zh / boundary_zh</code>，避免后续打标跑偏。</div>
+              <div><strong>Context：</strong>只放人群、场景、用途、购买路径、使用阻碍等背景，不放产品性能好坏。</div>
+            </div>
+          </details>
           <details class="details-box">
             <summary>高级编辑：直接修改维度规则 JSON</summary>
             <textarea id="dimensionJson" class="json-editor" rows="16" placeholder="维度草案会显示在这里，可人工修改后保存"></textarea>
@@ -225,6 +248,22 @@
             <button id="runAllFinalBtn" class="primary">最终打标全部待处理批次</button>
             <a id="exportLinkBottom" class="button ghost disabled" href="#">下载最终 Excel</a>
           </div>
+        </section>
+
+        <section class="step-card" id="stepAnalysis">
+          <div class="step-head">
+            <div class="step-no">7</div>
+            <div>
+              <h3>细分维度与优化切入口</h3>
+              <p class="hint">最终打标完成后，把每个维度下的原子属性做可追溯统计，并输出 Listing/运营可用的优化切入口。</p>
+            </div>
+            <div id="sAnalysis" class="step-state wait">未完成</div>
+          </div>
+          <div class="action-row">
+            <button id="generateAnalysisBtn" class="primary">生成细分维度与优化切入口</button>
+            <span class="hint">基于最终打标宽表统计，不做关键词硬匹配。</span>
+          </div>
+          <div id="analysisPreview" class="analysis-preview"></div>
         </section>
       </main>
     </div>
