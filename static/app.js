@@ -3,15 +3,17 @@ let state = {
   currentProjectId: null,
   currentProject: null,
   config: { has_deepseek_key: false },
+  busy: false,
+  busyText: "",
 };
 
 const $ = (id) => document.getElementById(id);
 
 const FLOW_LABELS = [
-  ["api", "0", "设置 API"],
+  ["api", "0", "访问保护"],
   ["project", "1", "建项目"],
   ["upload", "2", "导入 Review"],
-  ["atomic", "3", "原子标签"],
+  ["atomic", "3", "最小语义"],
   ["draft", "4", "维度草案"],
   ["lock", "5", "锁定规则"],
   ["final", "6", "最终打标"],
@@ -71,6 +73,43 @@ function formatNum(value) {
   return Number(value || 0).toLocaleString("zh-CN");
 }
 
+function setBusy(text = "") {
+  state.busy = Boolean(text);
+  state.busyText = text;
+  const el = $("runStatus");
+  if (el) {
+    el.textContent = text || "当前没有后台任务运行";
+    el.className = `run-status ${text ? "running" : "idle"}`;
+  }
+  const ids = [
+    "createProjectBtn",
+    "uploadBtn",
+    "runAllAtomicBtn",
+    "proposeDimensionsBtn",
+    "saveDimensionsBtn",
+    "unlockDimensionsBtn",
+    "runAllFinalBtn",
+    "generateAnalysisBtn",
+  ];
+  ids.forEach((id) => {
+    const node = $(id);
+    if (node) node.disabled = Boolean(text);
+  });
+  document.querySelectorAll(".run-batch, .final-batch, .project-delete").forEach((btn) => {
+    btn.disabled = Boolean(text);
+  });
+}
+
+async function withBusy(text, task) {
+  if (state.busy) throw new Error("当前已有任务正在处理中，请等待完成后再操作，避免重复消耗 API。");
+  setBusy(text);
+  try {
+    return await task();
+  } finally {
+    setBusy("");
+  }
+}
+
 async function loadProjects() {
   state.config = await request("/api/config");
   const data = await request("/api/projects");
@@ -106,19 +145,29 @@ function renderProjectList() {
       const stats = p.stats || {};
       return `
         <div class="project-item ${active}" data-id="${p.id}">
-          <strong>${escapeHtml(p.name)}</strong>
-          <span>${escapeHtml(p.category || "未填写品类")} · ${formatNum(stats.reviews)} 条评论 · ${escapeHtml(p.stage)}</span>
+          <button class="project-select" data-id="${p.id}">
+            <strong>${escapeHtml(p.name)}</strong>
+            <span>${escapeHtml(p.category || "未填写品类")} · ${formatNum(stats.reviews)} 条评论 · ${escapeHtml(p.stage)}</span>
+          </button>
+          <button class="project-delete" data-id="${p.id}" data-name="${escapeHtml(p.name)}">删除</button>
         </div>`;
     })
     .join("");
-  box.querySelectorAll(".project-item").forEach((el) => {
+  box.querySelectorAll(".project-select").forEach((el) => {
     el.addEventListener("click", () => loadProject(el.dataset.id));
   });
+  box.querySelectorAll(".project-delete").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteProject(btn.dataset.id, btn.dataset.name).catch(showLog);
+    });
+  });
+  if (state.busy) setBusy(state.busyText);
 }
 
 function renderEmpty() {
   $("projectTitle").textContent = "请选择或新建项目";
-  $("projectSubtitle").textContent = "从左侧开始：确认 API → 建项目 → 上传 Review → 按顺序点击每一步。";
+  $("projectSubtitle").textContent = "从左侧开始：确认访问保护 → 建项目 → 上传 Review → 按顺序点击每一步。";
   renderMetrics({});
   renderWorkflow(null);
   setStepState("sProject", false, "未完成");
@@ -130,8 +179,9 @@ function renderEmpty() {
   setStepState("sAnalysis", false, "未完成");
   $("batchTable").innerHTML = "";
   $("dimensionPool").innerHTML = "";
-  $("dimensionCards").innerHTML = `<div class="empty-box">完成原子标签后，再生成维度草案。</div>`;
+  $("dimensionCards").innerHTML = `<div class="empty-box">完成最小语义标签后，再生成维度草案。</div>`;
   $("atomicPreview").innerHTML = "";
+  $("ruleEditor").innerHTML = "";
   $("needReviewPanel").innerHTML = "";
   $("analysisPreview").innerHTML = "";
   $("dimensionJson").value = "";
@@ -157,6 +207,7 @@ function renderProject(data) {
   renderAtomicPreview(data.atomic_results || []);
   renderNeedReviewPanel(data.need_review_items || []);
   renderAnalysisPreview(data.analysis_summary || {});
+  if (state.busy) setBusy(state.busyText);
 }
 
 function renderMetrics(stats) {
@@ -174,7 +225,6 @@ function hasApiReady() {
 
 function renderApiKeyStatus() {
   const ready = hasApiReady();
-  const mock = Boolean($("mockRun")?.checked);
   const el = $("apiKeyStatus");
   if (!el) return;
   if (state.config?.has_deepseek_key && apiKey()) {
@@ -182,8 +232,7 @@ function renderApiKeyStatus() {
     $("apiKey").value = "";
   }
   $("apiKey").disabled = Boolean(state.config?.has_deepseek_key);
-  $("apiKey").placeholder = state.config?.has_deepseek_key ? "服务端已配置，不会使用浏览器旧 Key" : "服务端未配置时再临时粘贴";
-  el.textContent = state.config?.has_deepseek_key ? "已接入服务端 API" : mock ? "模拟运行已开启" : ready ? "已填写临时 Key" : "未填写";
+  el.textContent = state.config?.has_deepseek_key ? "访问码保护 + 服务端 API 已启用" : ready ? "已填写临时 Key" : "未接入 API";
   el.className = `step-state ${ready ? "done" : "wait"}`;
 }
 
@@ -235,10 +284,10 @@ function renderWorkflow(data) {
 
 function nextActionText(key) {
   const map = {
-    api: "下一步：等待服务端 API 接入，或临时填写 DeepSeek API Key",
+    api: "下一步：确认访问保护和服务端 API",
     project: "下一步：创建项目",
     upload: "下一步：上传 Review 文件",
-    atomic: "下一步：提取原子标签",
+    atomic: "下一步：提取最小语义标签",
     draft: "下一步：生成维度草案",
     lock: "下一步：检查草案并锁定规则",
     final: "下一步：最终打标全部待处理批次",
@@ -281,7 +330,7 @@ function renderBatches(batches) {
             <td>${escapeHtml(b.model || "")}</td>
             <td>${escapeHtml(b.error || "")}</td>
             <td>
-              <button data-batch="${b.id}" class="run-batch">单批原子提取</button>
+              <button data-batch="${b.id}" class="run-batch">单批最小语义提取</button>
               <button data-batch="${b.id}" class="final-batch">单批最终打标</button>
             </td>
           </tr>
@@ -289,10 +338,10 @@ function renderBatches(batches) {
       </tbody>
     </table>`;
   document.querySelectorAll(".run-batch").forEach((btn) => {
-    btn.addEventListener("click", () => runBatch(btn.dataset.batch));
+    btn.addEventListener("click", () => withBusy(`正在提取 ${btn.dataset.batch} 的最小语义标签...`, () => runBatch(btn.dataset.batch)).catch(showLog));
   });
   document.querySelectorAll(".final-batch").forEach((btn) => {
-    btn.addEventListener("click", () => runFinalBatch(btn.dataset.batch));
+    btn.addEventListener("click", () => withBusy(`正在最终打标 ${btn.dataset.batch}...`, () => runFinalBatch(btn.dataset.batch)).catch(showLog));
   });
 }
 
@@ -305,6 +354,7 @@ function renderDimensionEditor(data) {
     null;
   if (!source) {
     $("dimensionJson").value = "";
+    $("ruleEditor").innerHTML = `<div class="empty-box">生成维度草案后，这里会出现可直接修改的规则表单。</div>`;
     return;
   }
   $("dimensionJson").value = JSON.stringify(
@@ -317,6 +367,117 @@ function renderDimensionEditor(data) {
     null,
     2
   );
+  renderRuleEditor(source);
+}
+
+function renderRuleEditor(source) {
+  const decision = source.decision_dimensions || [];
+  const context = source.context_fields || [];
+  $("ruleEditor").innerHTML = `
+    <div class="rule-toolbar">
+      <button id="addDecisionRule" class="ghost">新增购买决策维度</button>
+      <button id="addContextRule" class="ghost">新增 Context 字段</button>
+      <span class="hint">改完后点“确认无误，保存为锁定规则”。保存前不会进入最终打标。</span>
+    </div>
+    <div class="dimension-section-title">可编辑：购买决策维度</div>
+    <div id="decisionRuleList" class="rule-list">
+      ${decision.map((item) => ruleEditCard(item, "decision")).join("") || `<div class="hint">暂无购买决策维度。</div>`}
+    </div>
+    <div class="dimension-section-title">可编辑：Context 字段</div>
+    <div id="contextRuleList" class="rule-list">
+      ${context.map((item) => ruleEditCard(item, "context")).join("") || `<div class="hint">暂无 Context 字段。</div>`}
+    </div>
+  `;
+  $("addDecisionRule").addEventListener("click", () => appendRuleCard("decision"));
+  $("addContextRule").addEventListener("click", () => appendRuleCard("context"));
+  bindRuleDeleteButtons();
+}
+
+function ruleEditCard(item, type) {
+  const isDecision = type === "decision";
+  const sourceTags = (item.source_atomic_tags || []).join("\n");
+  return `
+    <article class="rule-card" data-rule-type="${type}">
+      <div class="rule-card-head">
+        <strong>${isDecision ? "购买决策维度" : "Context 字段"}</strong>
+        <button class="rule-delete ghost" type="button">删除这个${isDecision ? "维度" : "字段"}</button>
+      </div>
+      <div class="form-grid two">
+        <label>名称<input data-field="name_zh" value="${escapeHtml(item.name_zh || "")}" placeholder="${isDecision ? "例如：无线稳定性" : "例如：使用场景"}" /></label>
+        <label>运营用途<input data-field="${isDecision ? "listing_use_zh" : "analysis_use_zh"}" value="${escapeHtml(isDecision ? item.listing_use_zh || "" : item.analysis_use_zh || "")}" /></label>
+      </div>
+      <label>定义<textarea data-field="definition_zh" rows="2">${escapeHtml(item.definition_zh || "")}</textarea></label>
+      ${isDecision ? `
+        <div class="form-grid two">
+          <label>正向 P 规则<textarea data-field="p_rule_zh" rows="2">${escapeHtml(item.p_rule_zh || "")}</textarea></label>
+          <label>负向 N 规则<textarea data-field="n_rule_zh" rows="2">${escapeHtml(item.n_rule_zh || "")}</textarea></label>
+        </div>
+        <div class="form-grid two">
+          <label>中性 M 规则<textarea data-field="m_rule_zh" rows="2">${escapeHtml(item.m_rule_zh || "")}</textarea></label>
+          <label>未提及 0 规则<textarea data-field="zero_rule_zh" rows="2">${escapeHtml(item.zero_rule_zh || "")}</textarea></label>
+        </div>
+        <label>决策问题<input data-field="decision_question_zh" value="${escapeHtml(item.decision_question_zh || "")}" /></label>
+      ` : `
+        <label>需要什么证据才能打这个 Context<textarea data-field="evidence_required_zh" rows="2">${escapeHtml(item.evidence_required_zh || "")}</textarea></label>
+      `}
+      <label>边界：什么该进，什么不该进<textarea data-field="boundary_zh" rows="2">${escapeHtml(item.boundary_zh || "")}</textarea></label>
+      <label>来源最小语义标签（每行一个，用于追溯；可不改）<textarea data-field="source_atomic_tags" rows="3">${escapeHtml(sourceTags)}</textarea></label>
+    </article>
+  `;
+}
+
+function appendRuleCard(type) {
+  const list = type === "decision" ? $("decisionRuleList") : $("contextRuleList");
+  if (!list) return;
+  const placeholder = list.querySelector(".hint");
+  if (placeholder) placeholder.remove();
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = ruleEditCard({ name_zh: "", definition_zh: "", source_atomic_tags: [] }, type);
+  list.appendChild(wrapper.firstElementChild);
+  bindRuleDeleteButtons();
+}
+
+function bindRuleDeleteButtons() {
+  document.querySelectorAll(".rule-delete").forEach((btn) => {
+    btn.onclick = () => btn.closest(".rule-card")?.remove();
+  });
+}
+
+function fieldValue(card, name) {
+  return (card.querySelector(`[data-field="${name}"]`)?.value || "").trim();
+}
+
+function lines(value) {
+  return value.split(/\n|；|;/).map((x) => x.trim()).filter(Boolean);
+}
+
+function collectRulesFromEditor() {
+  const decision = Array.from(document.querySelectorAll('.rule-card[data-rule-type="decision"]')).map((card) => ({
+    name_zh: fieldValue(card, "name_zh"),
+    definition_zh: fieldValue(card, "definition_zh"),
+    decision_question_zh: fieldValue(card, "decision_question_zh"),
+    p_rule_zh: fieldValue(card, "p_rule_zh"),
+    n_rule_zh: fieldValue(card, "n_rule_zh"),
+    m_rule_zh: fieldValue(card, "m_rule_zh"),
+    zero_rule_zh: fieldValue(card, "zero_rule_zh"),
+    boundary_zh: fieldValue(card, "boundary_zh"),
+    source_atomic_tags: lines(fieldValue(card, "source_atomic_tags")),
+    listing_use_zh: fieldValue(card, "listing_use_zh"),
+  })).filter((x) => x.name_zh);
+  const context = Array.from(document.querySelectorAll('.rule-card[data-rule-type="context"]')).map((card) => ({
+    name_zh: fieldValue(card, "name_zh"),
+    definition_zh: fieldValue(card, "definition_zh"),
+    evidence_required_zh: fieldValue(card, "evidence_required_zh"),
+    boundary_zh: fieldValue(card, "boundary_zh"),
+    source_atomic_tags: lines(fieldValue(card, "source_atomic_tags")),
+    analysis_use_zh: fieldValue(card, "analysis_use_zh"),
+  })).filter((x) => x.name_zh);
+  return {
+    decision_dimensions: decision,
+    context_fields: context,
+    overflow_or_other: [],
+    need_human_decisions: [],
+  };
 }
 
 function renderDimensionCards(data) {
@@ -331,7 +492,7 @@ function renderDimensionCards(data) {
   const context = sortByStats(source.context_fields || [], contextStats);
   const questions = source.need_human_decisions || [];
   if (!decision.length && !context.length) {
-    $("dimensionCards").innerHTML = `<div class="empty-box">还没有维度草案。先完成原子标签，再点击“生成维度草案”。</div>`;
+    $("dimensionCards").innerHTML = `<div class="empty-box">还没有维度草案。先完成最小语义标签，再点击“生成维度草案”。</div>`;
     return;
   }
   $("dimensionCards").innerHTML = `
@@ -348,7 +509,7 @@ function renderDimensionCards(data) {
     <div class="dimension-grid">
       ${context.map((item) => dimensionCard(item, "context", contextStats[item.name_zh || ""])).join("")}
     </div>
-    ${questions.length ? `<div class="review-questions"><strong>需要人工判断：</strong>${questions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
+    ${questions.length ? `<div class="review-questions"><strong>AI 提醒你重点检查：</strong>${questions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}<div class="hint">判断方法：到下方“可编辑规则表单”里检查相关维度名称、定义、P/N/M/0 和边界；不认可就直接改，改完再锁定。</div></div>` : ""}
   `;
 }
 
@@ -357,8 +518,9 @@ function chooseDimensionStats(allStats = {}) {
   const finalContext = allStats.final?.context || [];
   const hasFinal = finalDecision.some((x) => x.mention_count > 0) || finalContext.some((x) => x.mention_count > 0);
   const block = hasFinal ? allStats.final : allStats.source || {};
-  const sample = (block.decision || block.context || [])[0] || {};
-  return { ...block, sort_basis: sample.sort_basis || (hasFinal ? "按最终打标提及 Review 数降序" : "按来源原子标签覆盖 Review 数降序") };
+  const sampleRows = [...(block.decision || []), ...(block.context || [])];
+  const sample = sampleRows[0] || {};
+  return { ...block, sort_basis: sample.sort_basis || (hasFinal ? "按最终打标提及 Review 数降序" : "按来源最小语义标签覆盖 Review 数降序") };
 }
 
 function statsMap(rows) {
@@ -411,23 +573,24 @@ function renderDimensionPool(pool) {
   const product = pool.product_atomic_pool || [];
   const context = pool.context_atomic_pool || [];
   if (!product.length && !context.length) {
-    $("dimensionPool").innerHTML = `<div class="hint">完成至少一个批次后会出现候选原子池。</div>`;
+    $("dimensionPool").innerHTML = `<div class="hint">完成至少一个批次后会出现候选语义池。</div>`;
     return;
   }
   $("dimensionPool").innerHTML = `
-    <h4>产品表现原子池</h4>
-    ${product.slice(0, 20).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("")}
-    <h4>Context 原子池</h4>
-    ${context.slice(0, 20).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("")}
+    <div class="hint">这里只展示高频候选，完整明细会进入导出 Excel。</div>
+    <h4>产品表现信号池</h4>
+    ${product.slice(0, 30).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("") || `<div class="hint">暂无产品表现信号。</div>`}
+    <h4>背景信号池</h4>
+    ${context.slice(0, 30).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("") || `<div class="hint">暂无背景信号。</div>`}
   `;
 }
 
 function renderAtomicPreview(rows) {
   if (!rows.length) {
-    $("atomicPreview").innerHTML = `<div class="hint">暂无原子标签结果。</div>`;
+    $("atomicPreview").innerHTML = `<div class="hint">暂无最小语义标签结果。</div>`;
     return;
   }
-  const html = [];
+  const html = [`<div class="hint">这里只预览最近结果，不展示 1000 条全量明细；全量会参与后续维度草案和导出。</div>`];
   for (const row of rows.slice(0, 30)) {
     for (const tag of row.atomic_tags || []) {
       html.push(`
@@ -439,7 +602,7 @@ function renderAtomicPreview(rows) {
       `);
     }
   }
-  $("atomicPreview").innerHTML = html.join("") || `<div class="hint">批次完成但没有原子标签。</div>`;
+  $("atomicPreview").innerHTML = html.join("") || `<div class="hint">批次完成但没有最小语义标签。</div>`;
 }
 
 function renderNeedReviewPanel(items) {
@@ -450,7 +613,7 @@ function renderNeedReviewPanel(items) {
   $("needReviewPanel").innerHTML = `
     <div class="review-queue-head">
       <strong>${items.length} 条需复核</strong>
-      <span class="hint">优先看“原因”和“证据”，必要时再展开原文。</span>
+      <span class="hint">你只需要判断：证据是否支持、归属是否正确、规则是否要改。</span>
     </div>
     ${items.slice(0, 50).map((item) => `
       <details class="review-item">
@@ -459,10 +622,17 @@ function renderNeedReviewPanel(items) {
           <strong>${escapeHtml(item.review_id || "")}</strong>
           <span>${escapeHtml(item.reason || "")}</span>
         </summary>
+        <div class="review-decision-box">
+          <strong>怎么判断</strong>
+          <span>1. 原文是否真的表达了这个含义。</span>
+          <span>2. 如果表达了，看它应该进产品表现、Context，还是其他。</span>
+          <span>3. 如果 AI 的边界不对，到第 5 步直接改对应规则，再重新跑最终打标。</span>
+        </div>
         <div class="hint">证据：${escapeHtml(item.evidence || "无")}</div>
         <div class="raw-review">${escapeHtml((item.review_original || "").slice(0, 700))}</div>
       </details>
     `).join("")}
+    ${items.length > 50 ? `<div class="hint">页面先展示前 50 条，完整复核清单会进入导出 Excel。</div>` : ""}
   `;
 }
 
@@ -515,6 +685,20 @@ async function createProject() {
   document.getElementById("stepUpload").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+async function deleteProject(projectId, name) {
+  if (!projectId) return;
+  const ok = window.confirm(`确认删除项目「${name || projectId}」吗？\n\n删除后会从列表移除，服务端会先归档项目数据，避免误删后完全找不回。`);
+  if (!ok) return;
+  await withBusy("正在删除项目...", async () => {
+    await request(`/api/projects/${projectId}`, { method: "DELETE" });
+    if (state.currentProjectId === projectId) {
+      state.currentProjectId = null;
+      state.currentProject = null;
+    }
+    await loadProjects();
+  });
+}
+
 async function uploadReviews() {
   if (!state.currentProjectId) throw new Error("请先创建或选择项目");
   const file = $("reviewFile").files[0];
@@ -524,9 +708,12 @@ async function uploadReviews() {
   const data = await request(`/api/projects/${state.currentProjectId}/reviews`, { method: "POST", body: form });
   const parseInfoHtml = formatParseInfo(data.parse_info);
   $("uploadPreview").innerHTML = `
-    <div class="hint">已导入 ${formatNum(data.stats.reviews)} 条评论。系统正在自动准备后台任务，不需要手动分组。</div>
+    <div class="hint">已导入 ${formatNum(data.stats.reviews)} 条评论。下方只预览前 ${formatNum((data.sample || []).length)} 条，完整数据已保存并会参与后续处理。</div>
     ${parseInfoHtml}
-    ${(data.sample || []).map((r) => `<div class="tag-row"><strong>${escapeHtml(r.review_id)}</strong><small>${escapeHtml((r.review_original || "").slice(0, 160))}</small></div>`).join("")}
+    <details class="details-box" open>
+      <summary>Review 预览</summary>
+      ${(data.sample || []).map((r) => `<div class="tag-row"><strong>${escapeHtml(r.review_id)}</strong><small>${escapeHtml((r.review_original || "").slice(0, 220))}</small></div>`).join("")}
+    </details>
   `;
   await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: Number($("batchSize").value || 25) } });
   await loadProjects();
@@ -572,7 +759,7 @@ async function runBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const key = clientApiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key。线上版需要先在服务端配置 Key。");
   const btn = document.querySelector(`.run-batch[data-batch="${batchId}"]`);
   if (btn) {
     btn.disabled = true;
@@ -595,7 +782,7 @@ async function runFinalBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
   const key = clientApiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key。线上版需要先在服务端配置 Key。");
   const btn = document.querySelector(`.final-batch[data-batch="${batchId}"]`);
   if (btn) {
     btn.disabled = true;
@@ -616,33 +803,37 @@ async function runFinalBatch(batchId, options = {}) {
 
 async function proposeDimensions() {
   if (!state.currentProjectId) throw new Error("请先选择项目");
+  const count = state.currentProject?.project?.stats?.atomic_records || 0;
+  if (!count) throw new Error("请先完成第 3 步：提取最小语义标签。没有最小语义标签时，无法生成维度草案。");
   const key = clientApiKey();
   const mock = $("mockRun").checked;
-  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key。线上版需要先在服务端配置 Key。");
   const data = await request(`/api/projects/${state.currentProjectId}/propose-dimensions`, {
     method: "POST",
     json: { model: $("accurateModel").value.trim() || "deepseek-v4-pro", mock },
     headers: key ? { "X-DeepSeek-Key": key } : {},
   });
   await loadProject(state.currentProjectId);
-  showLog(data.dimension_model || data);
+  showLog("维度草案已生成。请在第 5 步的可编辑表单中检查、修改，再保存为锁定规则。");
   document.getElementById("stepLock").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function saveDimensions() {
   if (!state.currentProjectId) throw new Error("请先选择项目");
-  let payload;
-  try {
-    payload = JSON.parse($("dimensionJson").value || "{}");
-  } catch (err) {
-    throw new Error("维度 JSON 格式不正确，请先修正后保存");
+  let payload = collectRulesFromEditor();
+  if (!payload.decision_dimensions.length && !payload.context_fields.length) {
+    try {
+      payload = JSON.parse($("dimensionJson").value || "{}");
+    } catch (err) {
+      throw new Error("没有可保存的规则。请先生成维度草案，或在可编辑表单中新增维度。");
+    }
   }
   const data = await request(`/api/projects/${state.currentProjectId}/dimensions`, {
     method: "POST",
     json: { dimensions: payload },
   });
   await loadProject(state.currentProjectId);
-  showLog(data);
+  showLog("规则已锁定。现在可以进入第 6 步最终打标。");
   document.getElementById("stepFinal").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -665,11 +856,11 @@ async function generateAnalysis() {
 async function runAllAtomic() {
   const batches = state.currentProject?.batches || [];
   const pending = batches.filter((b) => !["done", "done_with_warnings", "final_done", "final_done_with_warnings"].includes(b.status));
-  if (!pending.length) throw new Error("没有待处理的原子提取批次");
+  if (!pending.length) throw new Error("没有待处理的最小语义提取批次");
   for (const b of pending) {
     await runBatch(b.id, { silent: true });
   }
-  showLog(`已完成 ${pending.length} 个后台批次的原子提取。`);
+  showLog(`已完成 ${pending.length} 个后台批次的最小语义提取。`);
 }
 
 async function runAllFinal() {
@@ -706,15 +897,15 @@ function bindEvents() {
     $("projectName").focus();
   });
   $("refreshBtn").addEventListener("click", () => loadProjects().catch(showLog));
-  $("createProjectBtn").addEventListener("click", () => createProject().catch(showLog));
-  $("uploadBtn").addEventListener("click", () => uploadReviews().catch(showLog));
+  $("createProjectBtn").addEventListener("click", () => withBusy("正在创建项目...", createProject).catch(showLog));
+  $("uploadBtn").addEventListener("click", () => withBusy("正在上传并识别 Review...", uploadReviews).catch(showLog));
   if ($("makeBatchesBtn")) $("makeBatchesBtn").addEventListener("click", () => makeBatches().catch(showLog));
-  $("runAllAtomicBtn").addEventListener("click", () => runAllAtomic().catch(showLog));
-  $("runAllFinalBtn").addEventListener("click", () => runAllFinal().catch(showLog));
-  $("proposeDimensionsBtn").addEventListener("click", () => proposeDimensions().catch(showLog));
-  $("saveDimensionsBtn").addEventListener("click", () => saveDimensions().catch(showLog));
-  $("unlockDimensionsBtn").addEventListener("click", () => unlockDimensions().catch(showLog));
-  $("generateAnalysisBtn").addEventListener("click", () => generateAnalysis().catch(showLog));
+  $("runAllAtomicBtn").addEventListener("click", () => withBusy("正在逐批提取最小语义标签，请不要重复点击...", runAllAtomic).catch(showLog));
+  $("runAllFinalBtn").addEventListener("click", () => withBusy("正在逐批最终打标，请不要重复点击...", runAllFinal).catch(showLog));
+  $("proposeDimensionsBtn").addEventListener("click", () => withBusy("正在生成维度草案，请等待结果...", proposeDimensions).catch(showLog));
+  $("saveDimensionsBtn").addEventListener("click", () => withBusy("正在保存并锁定规则...", saveDimensions).catch(showLog));
+  $("unlockDimensionsBtn").addEventListener("click", () => withBusy("正在解除锁定并回到草案...", unlockDimensions).catch(showLog));
+  $("generateAnalysisBtn").addEventListener("click", () => withBusy("正在生成细分维度和优化切入口...", generateAnalysis).catch(showLog));
 }
 
 if (location.protocol === "file:") {
