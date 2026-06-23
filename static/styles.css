@@ -388,11 +388,11 @@ button:disabled,
   border-color: var(--blue);
 }
 
-.workspace-page {
+.step-card.workspace-page {
   display: none;
 }
 
-.workspace-page.active {
+.step-card.workspace-page.active {
   display: flex;
 }
 
