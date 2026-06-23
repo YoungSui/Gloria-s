@@ -245,6 +245,12 @@ button:hover,
   border-color: var(--blue);
 }
 
+button:disabled,
+.button.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .primary {
   background: var(--blue);
   color: #fff;
@@ -285,9 +291,12 @@ button:hover,
 .project-item {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px;
-  cursor: pointer;
+  padding: 6px;
   background: #fff;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .project-item.active {
@@ -304,6 +313,45 @@ button:hover,
   display: block;
   color: var(--muted);
   font-size: 12px;
+}
+
+.project-select {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 4px;
+  min-width: 0;
+}
+
+.project-select:hover {
+  border-color: transparent;
+}
+
+.project-delete {
+  padding: 5px 8px;
+  color: var(--red);
+  border-color: #f3c0bd;
+  background: #fff7f6;
+  font-size: 12px;
+}
+
+.run-status {
+  margin-top: 6px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.run-status.idle {
+  background: #eef2f6;
+  color: var(--muted);
+}
+
+.run-status.running {
+  background: var(--yellow);
+  color: #7a4b00;
 }
 
 .workflow-card,
@@ -565,6 +613,45 @@ button:hover,
   padding: 1px 4px;
 }
 
+.rule-editor {
+  margin: 12px 0;
+}
+
+.rule-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.rule-list {
+  display: grid;
+  gap: 12px;
+}
+
+.rule-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.rule-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.rule-delete {
+  color: var(--red);
+  border-color: #f3c0bd;
+  background: #fff7f6;
+}
+
 .compact-step {
   padding-top: 18px;
   padding-bottom: 18px;
@@ -610,6 +697,23 @@ button:hover,
   padding: 8px;
   color: #344054;
   line-height: 1.55;
+}
+
+.review-decision-box {
+  margin-top: 10px;
+  margin-bottom: 8px;
+  border: 1px solid #f1d176;
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #7a4b00;
+}
+
+.review-decision-box strong {
+  color: #4f3000;
 }
 
 .analysis-grid {
