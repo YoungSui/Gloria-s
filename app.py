@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 import urllib.request
@@ -31,6 +32,8 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEFAULT_FAST_MODEL = os.environ.get("DEEPSEEK_FAST_MODEL", "deepseek-v4-flash")
 DEFAULT_ACCURATE_MODEL = os.environ.get("DEEPSEEK_ACCURATE_MODEL", "deepseek-v4-pro")
 ACCESS_CODE = os.environ.get("VOC_ACCESS_CODE", "").strip()
+ACTIVE_JOBS = {}
+JOBS_LOCK = threading.Lock()
 
 USAGE_MARKS = ["产品表现", "用户/关系", "场景/目的", "使用工具/搭配对象", "购买行为/态度", "泛化评价"]
 SENTIMENTS = ["P", "N", "M", "事实提及", "Drop"]
@@ -83,6 +86,21 @@ def save_projects(projects):
 
 def project_dir(project_id: str) -> Path:
     return DATA_DIR / project_id
+
+
+def job_status_path(project_id: str) -> Path:
+    return project_dir(project_id) / "job_status.json"
+
+
+def read_job_status(project_id: str) -> dict:
+    return read_json(job_status_path(project_id), {})
+
+
+def write_job_status(project_id: str, patch: dict) -> dict:
+    current = read_job_status(project_id)
+    status = {**current, **patch, "updated_at": now_iso()}
+    write_json(job_status_path(project_id), status)
+    return status
 
 
 def get_project(project_id: str):
@@ -483,6 +501,7 @@ def reset_after_reviews_upload(project_id: str) -> None:
             "locked_dimensions.json",
             "final_labels.json",
             "analysis_summary.json",
+            "job_status.json",
         ],
     )
 
@@ -492,7 +511,7 @@ def reset_after_atomic_change(project_id: str) -> None:
 
 
 def reset_after_dimension_change(project_id: str) -> None:
-    archive_and_remove(project_id, ["final_labels.json", "analysis_summary.json"])
+    archive_and_remove(project_id, ["final_labels.json", "analysis_summary.json", "job_status.json"])
 
 
 def is_locked_rules(data: dict) -> bool:
@@ -1299,6 +1318,212 @@ def merge_final_labels(project_id: str, batch_id: str, result: dict, usage: dict
     write_json(path, existing)
 
 
+def process_atomic_batch(project_id: str, batch_id: str, api_key: str, model: str, mock: bool) -> dict:
+    project = get_project(project_id)
+    batch, reviews = batch_reviews(project_id, batch_id)
+    if not project:
+        raise ValueError("project_not_found")
+    if not batch:
+        raise ValueError("batch_not_found")
+    if not reviews:
+        raise ValueError("empty_batch")
+    if not mock and not api_key:
+        raise ValueError("missing_deepseek_key")
+
+    set_batch_status(project_id, batch_id, status="running", model=model, started_at=now_iso(), error="")
+    started = time.time()
+    try:
+        if mock:
+            result, usage = mock_atomic_extract(reviews)
+        else:
+            result, usage = deepseek_chat(api_key, model, atomic_prompt(project, reviews))
+        errors = validate_atomic_result(result, {r["review_id"] for r in reviews})
+        merge_atomic_results(project_id, batch_id, result, usage)
+        propose_dimensions(project_id)
+        set_batch_status(
+            project_id,
+            batch_id,
+            status="done" if not errors else "done_with_warnings",
+            finished_at=now_iso(),
+            error="；".join(errors[:5]),
+        )
+        return {
+            "status": "ok",
+            "validation_errors": errors,
+            "usage": usage,
+            "duration_sec": round(time.time() - started, 1),
+            "stats": project_stats(project_id),
+        }
+    except Exception as e:
+        set_batch_status(project_id, batch_id, status="failed", finished_at=now_iso(), error=str(e)[:1200])
+        raise
+
+
+def process_final_batch(project_id: str, batch_id: str, api_key: str, model: str, mock: bool) -> dict:
+    project = get_project(project_id)
+    rules = rules_for_project(project_id)
+    batch, reviews = batch_reviews(project_id, batch_id)
+    if not project:
+        raise ValueError("project_not_found")
+    if not rules.get("decision_dimensions") and not rules.get("context_fields"):
+        raise ValueError("missing_locked_dimensions")
+    if not batch:
+        raise ValueError("batch_not_found")
+    if not reviews:
+        raise ValueError("empty_batch")
+    if not mock and not api_key:
+        raise ValueError("missing_deepseek_key")
+
+    set_batch_status(project_id, batch_id, status="final_running", model=model, started_at=now_iso(), error="")
+    started = time.time()
+    try:
+        review_ids = {r["review_id"] for r in reviews}
+        if mock:
+            result = {
+                "reviews": [
+                    {
+                        "review_id": r["review_id"],
+                        "dimensions": {},
+                        "context": {},
+                        "other": {"T": "0", "R": "无"},
+                        "need_review": True,
+                        "review_flags": ["模拟最终打标，不作为正式结果"],
+                    }
+                    for r in reviews
+                ]
+            }
+            usage = {"mock": True}
+        else:
+            atomic_rows = atomic_for_review(project_id, review_ids)
+            result, usage = deepseek_chat(api_key, model, final_label_prompt(project, rules, reviews, atomic_rows), max_tokens=24000, temperature=0.08)
+        normalized, errors = normalize_final_result(result, review_ids, rules)
+        merge_final_labels(project_id, batch_id, normalized, usage)
+        set_batch_status(
+            project_id,
+            batch_id,
+            status="final_done" if not errors else "final_done_with_warnings",
+            finished_at=now_iso(),
+            error="；".join(errors[:5]),
+        )
+        update_project(project_id, {"stage": "final_labeling"})
+        return {
+            "status": "ok",
+            "validation_errors": errors,
+            "usage": usage,
+            "duration_sec": round(time.time() - started, 1),
+            "stats": project_stats(project_id),
+        }
+    except Exception as e:
+        set_batch_status(project_id, batch_id, status="final_failed", finished_at=now_iso(), error=str(e)[:1200])
+        raise
+
+
+ATOMIC_DONE_STATUSES = {"done", "done_with_warnings", "final_done", "final_done_with_warnings"}
+FINAL_DONE_STATUSES = {"final_done", "final_done_with_warnings"}
+RUNNING_JOB_STATUSES = {"running", "starting"}
+
+
+def selectable_batches(project_id: str, kind: str, scope: str) -> list[dict]:
+    batches = read_json(project_dir(project_id) / "batches.json", [])
+    if kind == "atomic":
+        selected = [b for b in batches if b.get("status") not in ATOMIC_DONE_STATUSES and b.get("status") != "running"]
+    else:
+        selected = [b for b in batches if b.get("status") not in FINAL_DONE_STATUSES and b.get("status") != "final_running"]
+    if scope == "calibration":
+        return selected[:1]
+    return selected
+
+
+def start_background_job(project_id: str, kind: str, scope: str, api_key: str, model: str, mock: bool) -> dict:
+    if kind not in {"atomic", "final"}:
+        raise ValueError("invalid_job_kind")
+    if not get_project(project_id):
+        raise ValueError("project_not_found")
+    if not mock and not api_key:
+        raise ValueError("missing_deepseek_key")
+    batches = selectable_batches(project_id, kind, scope)
+    if not batches:
+        raise ValueError("no_pending_batches")
+
+    with JOBS_LOCK:
+        active = ACTIVE_JOBS.get(project_id)
+        if active and active.get("status") in RUNNING_JOB_STATUSES:
+            return read_job_status(project_id) or active
+        job = {
+            "job_id": uuid.uuid4().hex[:10],
+            "kind": kind,
+            "scope": scope,
+            "status": "starting",
+            "model": model,
+            "total_batches": len(batches),
+            "completed_batches": 0,
+            "failed_batches": 0,
+            "current_batch": "",
+            "started_at": now_iso(),
+            "updated_at": now_iso(),
+            "finished_at": "",
+            "error": "",
+            "batch_errors": [],
+        }
+        ACTIVE_JOBS[project_id] = job
+        write_json(job_status_path(project_id), job)
+
+    thread = threading.Thread(target=run_background_job, args=(project_id, job["job_id"], kind, batches, api_key, model, mock), daemon=True)
+    thread.start()
+    return job
+
+
+def run_background_job(project_id: str, job_id: str, kind: str, batches: list[dict], api_key: str, model: str, mock: bool) -> None:
+    completed = 0
+    failed = 0
+    batch_errors = []
+    write_job_status(project_id, {"job_id": job_id, "status": "running"})
+    try:
+        for batch in batches:
+            batch_id = batch.get("id", "")
+            write_job_status(
+                project_id,
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "current_batch": batch_id,
+                    "completed_batches": completed,
+                    "failed_batches": failed,
+                    "batch_errors": batch_errors[-8:],
+                },
+            )
+            try:
+                if kind == "atomic":
+                    process_atomic_batch(project_id, batch_id, api_key, model, mock)
+                else:
+                    process_final_batch(project_id, batch_id, api_key, model, mock)
+                completed += 1
+            except Exception as e:
+                failed += 1
+                batch_errors.append({"batch_id": batch_id, "error": str(e)[:500]})
+        status = "done" if failed == 0 else "done_with_errors"
+        write_job_status(
+            project_id,
+            {
+                "job_id": job_id,
+                "status": status,
+                "current_batch": "",
+                "completed_batches": completed,
+                "failed_batches": failed,
+                "batch_errors": batch_errors[-20:],
+                "finished_at": now_iso(),
+                "error": "" if failed == 0 else f"{failed} 个批次失败，可修正后继续跑待处理批次。",
+            },
+        )
+    except Exception as e:
+        write_job_status(project_id, {"job_id": job_id, "status": "failed", "error": str(e)[:1000], "finished_at": now_iso()})
+    finally:
+        with JOBS_LOCK:
+            active = ACTIVE_JOBS.get(project_id)
+            if active and active.get("job_id") == job_id:
+                ACTIVE_JOBS.pop(project_id, None)
+
+
 def build_export(project_id: str):
     project = get_project(project_id)
     reviews = read_json(project_dir(project_id) / "reviews.json", [])
@@ -1588,6 +1813,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "need_review_items": need_review_items(project_id),
                     "final_labels": read_json(project_dir(project_id) / "final_labels.json", [])[:30],
                     "analysis_summary": read_json(project_dir(project_id) / "analysis_summary.json", {}),
+                    "job_status": read_job_status(project_id),
                 },
             )
             return
@@ -1608,6 +1834,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             rows = read_json(project_dir(project_id) / "atomic_results.json", [])
             send_json(self, {"atomic_results": rows, "count": len(rows)})
+            return
+        m = re.match(r"^/api/projects/([^/]+)/job-status$", path)
+        if m:
+            project_id = m.group(1)
+            if not get_project(project_id):
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            send_json(self, {"job_status": read_job_status(project_id), "stats": project_stats(project_id)})
             return
         m = re.match(r"^/api/projects/([^/]+)/export$", path)
         if m:
@@ -1774,6 +2008,31 @@ class Handler(SimpleHTTPRequestHandler):
             send_json(self, {"status": "ok", "analysis_summary": summary, "stats": project_stats(project_id)})
             return
 
+        m = re.match(r"^/api/projects/([^/]+)/jobs$", path)
+        if m:
+            project_id = m.group(1)
+            project = get_project(project_id)
+            if not project:
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            data = body_json(self)
+            kind = data.get("kind", "atomic")
+            scope = data.get("scope", "all")
+            mock = bool(data.get("mock"))
+            default_model = project.get("fast_model") or DEFAULT_FAST_MODEL
+            if kind == "dimension":
+                default_model = project.get("accurate_model") or DEFAULT_ACCURATE_MODEL
+            model = data.get("model") or default_model
+            api_key = self.headers.get("X-DeepSeek-Key") or os.environ.get("DEEPSEEK_API_KEY", "")
+            try:
+                job = start_background_job(project_id, kind, scope, api_key, model, mock)
+                send_json(self, {"status": "started", "job_status": job, "stats": project_stats(project_id)})
+            except ValueError as e:
+                send_json(self, {"error": str(e)}, 400)
+            except Exception as e:
+                send_json(self, {"error": "job_start_failed", "detail": str(e)}, 500)
+            return
+
         m = re.match(r"^/api/projects/([^/]+)/batches/([^/]+)/extract-atomic$", path)
         if m:
             project_id, batch_id = m.group(1), m.group(2)
@@ -1795,35 +2054,9 @@ class Handler(SimpleHTTPRequestHandler):
             if not mock and not api_key:
                 send_json(self, {"error": "missing_deepseek_key"}, 400)
                 return
-            set_batch_status(project_id, batch_id, status="running", model=model, started_at=now_iso(), error="")
-            started = time.time()
             try:
-                if mock:
-                    result, usage = mock_atomic_extract(reviews)
-                else:
-                    result, usage = deepseek_chat(api_key, model, atomic_prompt(project, reviews))
-                errors = validate_atomic_result(result, {r["review_id"] for r in reviews})
-                merge_atomic_results(project_id, batch_id, result, usage)
-                propose_dimensions(project_id)
-                set_batch_status(
-                    project_id,
-                    batch_id,
-                    status="done" if not errors else "done_with_warnings",
-                    finished_at=now_iso(),
-                    error="；".join(errors[:5]),
-                )
-                send_json(
-                    self,
-                    {
-                        "status": "ok",
-                        "validation_errors": errors,
-                        "usage": usage,
-                        "duration_sec": round(time.time() - started, 1),
-                        "stats": project_stats(project_id),
-                    },
-                )
+                send_json(self, process_atomic_batch(project_id, batch_id, api_key, model, mock))
             except Exception as e:
-                set_batch_status(project_id, batch_id, status="failed", finished_at=now_iso(), error=str(e)[:1200])
                 send_json(self, {"error": "extract_failed", "detail": str(e)}, 500)
             return
 
@@ -1852,50 +2085,9 @@ class Handler(SimpleHTTPRequestHandler):
             if not mock and not api_key:
                 send_json(self, {"error": "missing_deepseek_key"}, 400)
                 return
-            set_batch_status(project_id, batch_id, status="final_running", model=model, started_at=now_iso(), error="")
-            started = time.time()
             try:
-                review_ids = {r["review_id"] for r in reviews}
-                if mock:
-                    result = {
-                        "reviews": [
-                            {
-                                "review_id": r["review_id"],
-                                "dimensions": {},
-                                "context": {},
-                                "other": {"T": "0", "R": "无"},
-                                "need_review": True,
-                                "review_flags": ["模拟最终打标，不作为正式结果"],
-                            }
-                            for r in reviews
-                        ]
-                    }
-                    usage = {"mock": True}
-                else:
-                    atomic_rows = atomic_for_review(project_id, review_ids)
-                    result, usage = deepseek_chat(api_key, model, final_label_prompt(project, rules, reviews, atomic_rows), max_tokens=24000, temperature=0.08)
-                normalized, errors = normalize_final_result(result, review_ids, rules)
-                merge_final_labels(project_id, batch_id, normalized, usage)
-                set_batch_status(
-                    project_id,
-                    batch_id,
-                    status="final_done" if not errors else "final_done_with_warnings",
-                    finished_at=now_iso(),
-                    error="；".join(errors[:5]),
-                )
-                update_project(project_id, {"stage": "final_labeling"})
-                send_json(
-                    self,
-                    {
-                        "status": "ok",
-                        "validation_errors": errors,
-                        "usage": usage,
-                        "duration_sec": round(time.time() - started, 1),
-                        "stats": project_stats(project_id),
-                    },
-                )
+                send_json(self, process_final_batch(project_id, batch_id, api_key, model, mock))
             except Exception as e:
-                set_batch_status(project_id, batch_id, status="final_failed", finished_at=now_iso(), error=str(e)[:1200])
                 send_json(self, {"error": "final_label_failed", "detail": str(e)}, 500)
             return
 
