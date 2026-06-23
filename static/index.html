@@ -62,6 +62,8 @@
           <div id="flowSteps" class="flow-steps"></div>
         </section>
 
+        <section id="pageTabs" class="page-tabs"></section>
+
         <section class="cards six">
           <div class="metric">
             <span>评论数</span>
@@ -89,18 +91,7 @@
           </div>
         </section>
 
-        <section class="step-card compact-step" id="reviewQueueCard">
-          <div class="step-head">
-            <div class="step-no small">!</div>
-            <div>
-              <h3>人工 NeedReview 复核清单</h3>
-              <p class="hint">只看 AI 标低置信、边界冲突或可能误判的内容。这里不是让你重新逐条分析全部 Review。</p>
-            </div>
-          </div>
-          <div id="needReviewPanel" class="review-queue"></div>
-        </section>
-
-        <section class="step-card" id="stepProject">
+        <section class="step-card workspace-page active" id="stepProject" data-page="project">
           <div class="step-head">
             <div class="step-no">1</div>
             <div>
@@ -120,7 +111,7 @@
             </label>
             <label>
               后台处理数量（默认即可）
-              <input id="batchSize" type="number" min="5" max="100" value="25" />
+              <input id="batchSize" type="number" min="10" max="100" value="50" />
             </label>
           </div>
           <div class="form-grid two">
@@ -141,9 +132,10 @@
             <button id="createProjectBtn" class="primary">创建项目并进入下一步</button>
             <span class="hint">已有项目时，可直接从左侧项目列表选择。</span>
           </div>
+          <div id="projectStatus" class="local-run-status idle">当前未处理</div>
         </section>
 
-        <section class="step-card" id="stepUpload">
+        <section class="step-card workspace-page" id="stepUpload" data-page="upload">
           <div class="step-head">
             <div class="step-no">2</div>
             <div>
@@ -156,7 +148,21 @@
             <input id="reviewFile" type="file" accept=".xlsx,.csv" />
             <button id="uploadBtn">上传 Review</button>
           </div>
-          <div id="uploadPreview" class="preview compact-preview"></div>
+          <div id="uploadStatus" class="local-run-status idle">当前未处理</div>
+          <div class="subtabs" data-subtabs="reviews">
+            <button class="subtab active" data-subtab-target="reviewPreviewPane">Review 预览</button>
+            <button class="subtab" data-subtab-target="reviewRowsPane">全量按行查看</button>
+          </div>
+          <div id="reviewPreviewPane" class="subtab-pane active">
+            <div id="uploadPreview" class="preview compact-preview"></div>
+          </div>
+          <div id="reviewRowsPane" class="subtab-pane">
+            <div class="action-row">
+              <button id="loadReviewRowsBtn" class="ghost">加载/刷新全量 Review 表</button>
+              <span class="hint">用于核对导入是否完整。1000 条也按行展示，不再挤在预览框里。</span>
+            </div>
+            <div id="reviewRowsTable" class="table-wrap"></div>
+          </div>
           <details class="details-box">
             <summary>后台处理状态（通常不用看）</summary>
             <p class="hint">系统会在上传后自动拆成后台任务，只是为了防止长 Review 调用超时，不是业务分组。</p>
@@ -164,7 +170,7 @@
           </details>
         </section>
 
-        <section class="step-card" id="stepAtomic">
+        <section class="step-card workspace-page" id="stepAtomic" data-page="atomic">
           <div class="step-head">
             <div class="step-no">3</div>
             <div>
@@ -174,22 +180,46 @@
             <div id="sAtomic" class="step-state wait">未完成</div>
           </div>
           <div class="action-row">
-            <button id="runAllAtomicBtn" class="primary">提取全部待处理批次</button>
-            <span class="hint">点击后请等待处理中状态结束，避免重复点击造成重复消耗。</span>
+            <button id="runCalibrationAtomicBtn" class="primary">先跑 50-100 条校准批次</button>
+            <button id="runAllAtomicBtn" class="ghost">确认后提取全部待处理批次</button>
+            <span class="hint">建议先看一批结果，确认语义准确后再大批量跑。</span>
           </div>
-          <div class="grid two compact-grid">
-            <div>
-              <div class="mini-title">最近最小语义标签（预览，不是全量）</div>
-              <div id="atomicPreview" class="preview tall"></div>
-            </div>
-            <div>
-              <div class="mini-title">候选语义池（按提及频次）</div>
-              <div id="dimensionPool" class="pool tall"></div>
-            </div>
+          <div id="atomicStatus" class="local-run-status idle">当前未处理</div>
+          <div class="subtabs" data-subtabs="atomic">
+            <button class="subtab active" data-subtab-target="atomicPreviewPane">最近结果预览</button>
+            <button class="subtab" data-subtab-target="atomicRowsPane">全量按行查看</button>
           </div>
+          <div id="atomicPreviewPane" class="subtab-pane active">
+            <div class="mini-title">最近最小语义标签（预览，不是全量）</div>
+            <div id="atomicPreview" class="preview tall"></div>
+          </div>
+          <div id="atomicRowsPane" class="subtab-pane">
+            <div class="action-row">
+              <button id="loadAtomicRowsBtn" class="ghost">加载/刷新全量最小语义表</button>
+              <span class="hint">一行一个最小语义标签，可追溯 Review、证据、归属和翻译。</span>
+            </div>
+            <div id="atomicRowsTable" class="table-wrap"></div>
+          </div>
+          <div class="signal-grid">
+            <section class="signal-card">
+              <div class="mini-title">产品表现信号池</div>
+              <p class="hint">只放产品功能、性能、结构、体验结果；用于后续购买决策维度。</p>
+              <div id="productPool" class="pool compact-pool"></div>
+            </section>
+            <section class="signal-card">
+              <div class="mini-title">背景信号池</div>
+              <p class="hint">只放人群、场景、用途、购买路径、设备环境；后续用下拉/填空形成 Context 字段。</p>
+              <div id="contextPool" class="pool compact-pool"></div>
+            </section>
+          </div>
+          <section class="inline-review-section">
+            <div class="mini-title">本步骤 NeedReview</div>
+            <p class="hint">归属不清、低置信、疑似售后/包装/物流混入的内容会先出现在这里。</p>
+            <div id="atomicNeedReviewPanel" class="review-queue"></div>
+          </section>
         </section>
 
-        <section class="step-card" id="stepDimensions">
+        <section class="step-card workspace-page" id="stepDimensions" data-page="draft">
           <div class="step-head">
             <div class="step-no">4</div>
             <div>
@@ -202,10 +232,11 @@
             <button id="proposeDimensionsBtn" class="primary">生成维度草案</button>
             <span class="hint">生成后先看下面的可读卡片和第 5 步可编辑表单，不需要看技术格式。</span>
           </div>
+          <div id="draftStatus" class="local-run-status idle">当前未处理</div>
           <div id="dimensionCards" class="dimension-cards"></div>
         </section>
 
-        <section class="step-card" id="stepLock">
+        <section class="step-card workspace-page" id="stepLock" data-page="lock">
           <div class="step-head">
             <div class="step-no">5</div>
             <div>
@@ -219,6 +250,7 @@
             <button id="unlockDimensionsBtn" class="ghost">解除锁定并回到草案</button>
             <span class="hint">没锁定前不要跑最终打标；不同意 AI 划分时，先按下方规则改草案。</span>
           </div>
+          <div id="lockStatus" class="local-run-status idle">当前未处理</div>
           <details class="details-box" open>
             <summary>如果不同意 AI 的维度划分，怎么改</summary>
             <div class="edit-rules">
@@ -237,7 +269,7 @@
           </details>
         </section>
 
-        <section class="step-card" id="stepFinal">
+        <section class="step-card workspace-page" id="stepFinal" data-page="final">
           <div class="step-head">
             <div class="step-no">6</div>
             <div>
@@ -250,9 +282,15 @@
             <button id="runAllFinalBtn" class="primary">最终打标全部待处理批次</button>
             <a id="exportLinkBottom" class="button ghost disabled" href="#">下载最终 Excel</a>
           </div>
+          <div id="finalStatus" class="local-run-status idle">当前未处理</div>
+          <section class="inline-review-section">
+            <div class="mini-title">最终打标 NeedReview</div>
+            <p class="hint">最终宽表里的低置信、边界冲突或可能幻觉，会在这里集中展示。</p>
+            <div id="finalNeedReviewPanel" class="review-queue"></div>
+          </section>
         </section>
 
-        <section class="step-card" id="stepAnalysis">
+        <section class="step-card workspace-page" id="stepAnalysis" data-page="analysis">
           <div class="step-head">
             <div class="step-no">7</div>
             <div>
@@ -265,6 +303,7 @@
             <button id="generateAnalysisBtn" class="primary">生成细分维度与优化切入口</button>
             <span class="hint">基于最终打标宽表统计，不做关键词硬匹配。</span>
           </div>
+          <div id="analysisStatus" class="local-run-status idle">当前未处理</div>
           <div id="analysisPreview" class="analysis-preview"></div>
         </section>
       </main>
