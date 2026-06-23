@@ -5,6 +5,10 @@ let state = {
   config: { has_deepseek_key: false },
   busy: false,
   busyText: "",
+  busyStatusId: "",
+  activePage: "project",
+  fullReviews: null,
+  fullAtomic: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +24,79 @@ const FLOW_LABELS = [
   ["analysis", "7", "细分洞察"],
   ["export", "8", "导出 Excel"],
 ];
+
+const PAGE_LABELS = [
+  ["project", "1 建项目"],
+  ["upload", "2 导入 Review"],
+  ["atomic", "3 最小语义"],
+  ["draft", "4 维度草案"],
+  ["lock", "5 锁定规则"],
+  ["final", "6 最终打标"],
+  ["analysis", "7 细分洞察"],
+];
+
+const CONTEXT_PRESETS = {
+  "年龄段": {
+    definition_zh: "判断买家或实际使用者的年龄段，必须有明确年龄或人生阶段证据。",
+    evidence_required_zh: "原文明确提到年龄、年级、老人、孩子等可判断年龄段的信息。",
+    boundary_zh: "推荐给某年龄段但无法判断买家/使用者属于该人群时，不打。",
+    analysis_use_zh: "用于判断核心使用人群年龄分布和信息表达重点。",
+  },
+  "角色/身份": {
+    definition_zh: "判断买家或实际使用者是谁，必须有职业、身份或关系证据。",
+    evidence_required_zh: "原文明确提到学生、老师、程序员、金融从业者、父母、孩子等身份。",
+    boundary_zh: "只推荐某类人购买，不代表买家本人就是该角色。",
+    analysis_use_zh: "用于识别人群画像和 Listing 场景表达。",
+  },
+  "用户特征": {
+    definition_zh: "判断用户自身习惯、身体条件、经验水平或生态背景。",
+    evidence_required_zh: "原文明确说明小手、手部问题、技术熟练、Mac 生态、长期键盘经验等用户自身特征。",
+    boundary_zh: "设备兼容或产品表现本身不放这里，除非它描述的是用户背景。",
+    analysis_use_zh: "用于理解特殊偏好和适配人群。",
+  },
+  "使用场景": {
+    definition_zh: "判断键盘在哪里、和什么设备环境或桌面组合一起使用。",
+    evidence_required_zh: "原文明确提到办公室、家里、旅行、桌面、电脑/平板/手机组合等环境。",
+    boundary_zh: "长期任务放长期用途；设备能否兼容放产品决策维度。",
+    analysis_use_zh: "用于构建场景图、设备组合图和使用环境说明。",
+  },
+  "长期用途": {
+    definition_zh: "判断用户长期用产品做什么任务或工作流。",
+    evidence_required_zh: "原文明确提到写作、办公、交易、咨询、表格、编程、学习等持续性任务。",
+    boundary_zh: "临时触发原因放购买触发；单次试用不算长期用途。",
+    analysis_use_zh: "用于判断核心任务场景和卖点排序。",
+  },
+  "使用频率/强度": {
+    definition_zh: "判断使用频率、每日时长或使用强度。",
+    evidence_required_zh: "原文明确提到每天使用、每周使用、一天 8 小时、重度使用等。",
+    boundary_zh: "用了几个月/一年是使用周期，不是频率；除非同时说明每天或高频使用。",
+    analysis_use_zh: "用于判断耐用、续航、舒适度评价的强度背景。",
+  },
+  "替换/复购路径": {
+    definition_zh: "判断是否替换旧产品、复购本品，或改用其他替代方案。",
+    evidence_required_zh: "原文明确提到旧键盘、再次购买同款、改回有线键盘、换别的品牌等。",
+    boundary_zh: "售后换新不算复购；没有产生二次购买或替代选择时不打复购。",
+    analysis_use_zh: "用于理解流失、复购和替代竞争关系。",
+  },
+  "价格价值": {
+    definition_zh: "判断是否提到价格、价值、性价比、值不值。",
+    evidence_required_zh: "原文明确出现价格、value、worth、cheap、expensive、deal 等价值判断。",
+    boundary_zh: "单纯好评不等于价格价值；必须与价格或值不值有关。",
+    analysis_use_zh: "用于判断定价感知和促销沟通。",
+  },
+  "购买触发": {
+    definition_zh: "判断用户为什么现在购买。",
+    evidence_required_zh: "原文明确提到旧产品坏了、新设备、工作变化、搬家、旅行、突然需求等即时触发。",
+    boundary_zh: "长期用途不是购买触发；必须有当下购买原因。",
+    analysis_use_zh: "用于理解转化入口和广告/Listing 场景钩子。",
+  },
+  "使用阻碍": {
+    definition_zh: "判断上手、设置、连接、学习、操作是否构成阻碍。",
+    evidence_required_zh: "原文明确提到设置难、配对难、学习成本、操作不便、找不到开关等。",
+    boundary_zh: "产品性能失败归决策维度；这里强调使用过程中的阻碍。",
+    analysis_use_zh: "用于优化说明书、FAQ、主图提示和客服预防。",
+  },
+};
 
 function apiKey() {
   return localStorage.getItem("deepseek_api_key") || "";
@@ -73,17 +150,29 @@ function formatNum(value) {
   return Number(value || 0).toLocaleString("zh-CN");
 }
 
-function setBusy(text = "") {
+function setBusy(text = "", statusId = "") {
   state.busy = Boolean(text);
   state.busyText = text;
+  state.busyStatusId = statusId;
   const el = $("runStatus");
   if (el) {
     el.textContent = text || "当前没有后台任务运行";
     el.className = `run-status ${text ? "running" : "idle"}`;
   }
+  document.querySelectorAll(".local-run-status").forEach((node) => {
+    node.textContent = "当前未处理";
+    node.className = "local-run-status idle";
+  });
+  if (text && statusId && $(statusId)) {
+    $(statusId).textContent = text;
+    $(statusId).className = "local-run-status running";
+  }
   const ids = [
     "createProjectBtn",
     "uploadBtn",
+    "loadReviewRowsBtn",
+    "loadAtomicRowsBtn",
+    "runCalibrationAtomicBtn",
     "runAllAtomicBtn",
     "proposeDimensionsBtn",
     "saveDimensionsBtn",
@@ -95,14 +184,14 @@ function setBusy(text = "") {
     const node = $(id);
     if (node) node.disabled = Boolean(text);
   });
-  document.querySelectorAll(".run-batch, .final-batch, .project-delete").forEach((btn) => {
+  document.querySelectorAll(".run-batch, .final-batch, .project-delete, .subtab").forEach((btn) => {
     btn.disabled = Boolean(text);
   });
 }
 
-async function withBusy(text, task) {
+async function withBusy(text, task, statusId = "") {
   if (state.busy) throw new Error("当前已有任务正在处理中，请等待完成后再操作，避免重复消耗 API。");
-  setBusy(text);
+  setBusy(text, statusId);
   try {
     return await task();
   } finally {
@@ -110,11 +199,46 @@ async function withBusy(text, task) {
   }
 }
 
+function renderPageTabs() {
+  const box = $("pageTabs");
+  if (!box) return;
+  box.innerHTML = PAGE_LABELS.map(([key, label]) => `
+    <button class="page-tab ${state.activePage === key ? "active" : ""}" data-page-tab="${key}">${label}</button>
+  `).join("");
+  box.querySelectorAll(".page-tab").forEach((btn) => {
+    btn.addEventListener("click", () => showPage(btn.dataset.pageTab));
+  });
+}
+
+function showPage(key) {
+  state.activePage = key || "project";
+  document.querySelectorAll(".workspace-page").forEach((page) => {
+    page.classList.toggle("active", page.dataset.page === state.activePage);
+  });
+  renderPageTabs();
+}
+
+function bindSubTabs(root = document) {
+  root.querySelectorAll(".subtabs").forEach((group) => {
+    group.querySelectorAll(".subtab").forEach((btn) => {
+      btn.onclick = () => {
+        const target = btn.dataset.subtabTarget;
+        group.querySelectorAll(".subtab").forEach((x) => x.classList.toggle("active", x === btn));
+        const parent = group.parentElement;
+        parent?.querySelectorAll(".subtab-pane").forEach((pane) => {
+          pane.classList.toggle("active", pane.id === target);
+        });
+      };
+    });
+  });
+}
+
 async function loadProjects() {
   state.config = await request("/api/config");
   const data = await request("/api/projects");
   state.projects = data.projects || [];
   renderProjectList();
+  renderPageTabs();
   if (!state.currentProjectId && state.projects[0]) {
     state.currentProjectId = state.projects[0].id;
   }
@@ -178,15 +302,20 @@ function renderEmpty() {
   setStepState("sFinal", false, "未完成");
   setStepState("sAnalysis", false, "未完成");
   $("batchTable").innerHTML = "";
-  $("dimensionPool").innerHTML = "";
+  $("productPool").innerHTML = "";
+  $("contextPool").innerHTML = "";
   $("dimensionCards").innerHTML = `<div class="empty-box">完成最小语义标签后，再生成维度草案。</div>`;
   $("atomicPreview").innerHTML = "";
+  $("atomicRowsTable").innerHTML = "";
+  $("reviewRowsTable").innerHTML = "";
   $("ruleEditor").innerHTML = "";
-  $("needReviewPanel").innerHTML = "";
+  $("atomicNeedReviewPanel").innerHTML = "";
+  $("finalNeedReviewPanel").innerHTML = "";
   $("analysisPreview").innerHTML = "";
   $("dimensionJson").value = "";
   $("exportLink").classList.add("disabled");
   $("exportLinkBottom").classList.add("disabled");
+  showPage(state.activePage || "project");
 }
 
 function renderProject(data) {
@@ -205,9 +334,12 @@ function renderProject(data) {
   renderDimensionCards(data);
   renderDimensionPool(data.dimension_candidates || {});
   renderAtomicPreview(data.atomic_results || []);
-  renderNeedReviewPanel(data.need_review_items || []);
+  renderNeedReviewPanels(data.need_review_items || []);
+  renderReviewRows(data.reviews || [], true);
   renderAnalysisPreview(data.analysis_summary || {});
-  if (state.busy) setBusy(state.busyText);
+  bindSubTabs();
+  showPage(state.activePage || "project");
+  if (state.busy) setBusy(state.busyText, state.busyStatusId);
 }
 
 function renderMetrics(stats) {
@@ -338,10 +470,10 @@ function renderBatches(batches) {
       </tbody>
     </table>`;
   document.querySelectorAll(".run-batch").forEach((btn) => {
-    btn.addEventListener("click", () => withBusy(`正在提取 ${btn.dataset.batch} 的最小语义标签...`, () => runBatch(btn.dataset.batch)).catch(showLog));
+    btn.addEventListener("click", () => withBusy(`正在提取 ${btn.dataset.batch} 的最小语义标签...`, () => runBatch(btn.dataset.batch), "atomicStatus").catch(showLog));
   });
   document.querySelectorAll(".final-batch").forEach((btn) => {
-    btn.addEventListener("click", () => withBusy(`正在最终打标 ${btn.dataset.batch}...`, () => runFinalBatch(btn.dataset.batch)).catch(showLog));
+    btn.addEventListener("click", () => withBusy(`正在最终打标 ${btn.dataset.batch}...`, () => runFinalBatch(btn.dataset.batch), "finalStatus").catch(showLog));
   });
 }
 
@@ -406,6 +538,14 @@ function ruleEditCard(item, type) {
         <label>名称<input data-field="name_zh" value="${escapeHtml(item.name_zh || "")}" placeholder="${isDecision ? "例如：无线稳定性" : "例如：使用场景"}" /></label>
         <label>运营用途<input data-field="${isDecision ? "listing_use_zh" : "analysis_use_zh"}" value="${escapeHtml(isDecision ? item.listing_use_zh || "" : item.analysis_use_zh || "")}" /></label>
       </div>
+      ${isDecision ? "" : `
+        <label>常用 Context 模板
+          <select class="context-preset">
+            <option value="">选择一个模板自动填充，也可以自己手填</option>
+            ${Object.keys(CONTEXT_PRESETS).map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}
+          </select>
+        </label>
+      `}
       <label>定义<textarea data-field="definition_zh" rows="2">${escapeHtml(item.definition_zh || "")}</textarea></label>
       ${isDecision ? `
         <div class="form-grid two">
@@ -440,6 +580,18 @@ function appendRuleCard(type) {
 function bindRuleDeleteButtons() {
   document.querySelectorAll(".rule-delete").forEach((btn) => {
     btn.onclick = () => btn.closest(".rule-card")?.remove();
+  });
+  document.querySelectorAll(".context-preset").forEach((select) => {
+    select.onchange = () => {
+      const preset = CONTEXT_PRESETS[select.value];
+      const card = select.closest(".rule-card");
+      if (!preset || !card) return;
+      card.querySelector('[data-field="name_zh"]').value = select.value;
+      card.querySelector('[data-field="definition_zh"]').value = preset.definition_zh;
+      card.querySelector('[data-field="evidence_required_zh"]').value = preset.evidence_required_zh;
+      card.querySelector('[data-field="boundary_zh"]').value = preset.boundary_zh;
+      card.querySelector('[data-field="analysis_use_zh"]').value = preset.analysis_use_zh;
+    };
   });
 }
 
@@ -573,15 +725,76 @@ function renderDimensionPool(pool) {
   const product = pool.product_atomic_pool || [];
   const context = pool.context_atomic_pool || [];
   if (!product.length && !context.length) {
-    $("dimensionPool").innerHTML = `<div class="hint">完成至少一个批次后会出现候选语义池。</div>`;
+    $("productPool").innerHTML = `<div class="hint">完成至少一个批次后会出现产品表现信号。</div>`;
+    $("contextPool").innerHTML = `<div class="hint">完成至少一个批次后会出现背景信号。</div>`;
     return;
   }
-  $("dimensionPool").innerHTML = `
-    <div class="hint">这里只展示高频候选，完整明细会进入导出 Excel。</div>
-    <h4>产品表现信号池</h4>
-    ${product.slice(0, 30).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("") || `<div class="hint">暂无产品表现信号。</div>`}
-    <h4>背景信号池</h4>
-    ${context.slice(0, 30).map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`).join("") || `<div class="hint">暂无背景信号。</div>`}
+  $("productPool").innerHTML = product.slice(0, 40)
+    .map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`)
+    .join("") || `<div class="hint">暂无产品表现信号。</div>`;
+  $("contextPool").innerHTML = context.slice(0, 40)
+    .map((x) => `<div class="tag-row"><strong>${escapeHtml(x.atomic_tag)}</strong><small>提及 ${x.count}</small></div>`)
+    .join("") || `<div class="hint">暂无背景信号。</div>`;
+}
+
+function renderReviewRows(rows, partial = false) {
+  const box = $("reviewRowsTable");
+  if (!box) return;
+  if (!rows.length) {
+    box.innerHTML = `<div class="hint" style="padding:12px">暂无 Review 行数据。</div>`;
+    return;
+  }
+  box.innerHTML = `
+    ${partial ? `<div class="table-note">当前先显示前 ${rows.length} 行；点击“加载/刷新全量 Review 表”可看全部。</div>` : ""}
+    <table>
+      <thead><tr><th>序号</th><th>ReviewID</th><th>星级</th><th>型号</th><th>英文原文</th><th>中文翻译</th></tr></thead>
+      <tbody>
+        ${rows.map((r) => `
+          <tr>
+            <td>${escapeHtml(r.seq || "")}</td>
+            <td>${escapeHtml(r.review_id || "")}</td>
+            <td>${escapeHtml(r.star || "")}</td>
+            <td>${escapeHtml(r.model || "")}</td>
+            <td class="long-cell">${escapeHtml(r.review_original || "")}</td>
+            <td class="long-cell">${escapeHtml(r.review_translation_zh || "")}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderAtomicRows(rows) {
+  const box = $("atomicRowsTable");
+  if (!box) return;
+  const flat = [];
+  for (const row of rows || []) {
+    for (const tag of row.atomic_tags || []) {
+      flat.push({ row, tag });
+    }
+  }
+  if (!flat.length) {
+    box.innerHTML = `<div class="hint" style="padding:12px">暂无最小语义标签行数据。</div>`;
+    return;
+  }
+  box.innerHTML = `
+    <table>
+      <thead><tr><th>ReviewID</th><th>批次</th><th>最小语义标签</th><th>倾向</th><th>归属</th><th>原文证据</th><th>中文翻译</th><th>NeedReview</th></tr></thead>
+      <tbody>
+        ${flat.map(({ row, tag }) => `
+          <tr>
+            <td>${escapeHtml(row.review_id || "")}</td>
+            <td>${escapeHtml(row.batch_id || "")}</td>
+            <td>${escapeHtml(tag.atomic_tag_zh || "")}</td>
+            <td>${escapeHtml(tag.sentiment || "")}</td>
+            <td>${(tag.usage_marks || []).map(escapeHtml).join("、")}</td>
+            <td class="long-cell">${escapeHtml(tag.evidence_original || "")}</td>
+            <td class="long-cell">${escapeHtml(row.review_translation_zh || "")}</td>
+            <td>${row.need_review ? "是" : "否"}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
   `;
 }
 
@@ -605,12 +818,21 @@ function renderAtomicPreview(rows) {
   $("atomicPreview").innerHTML = html.join("") || `<div class="hint">批次完成但没有最小语义标签。</div>`;
 }
 
-function renderNeedReviewPanel(items) {
+function renderNeedReviewPanels(items) {
+  const atomic = (items || []).filter((x) => x.stage === "最小语义标签");
+  const final = (items || []).filter((x) => x.stage === "最终打标");
+  renderNeedReviewPanel("atomicNeedReviewPanel", atomic, "当前没有最小语义阶段 NeedReview。");
+  renderNeedReviewPanel("finalNeedReviewPanel", final, "当前没有最终打标 NeedReview。");
+}
+
+function renderNeedReviewPanel(targetId, items, emptyText) {
+  const target = $(targetId);
+  if (!target) return;
   if (!items.length) {
-    $("needReviewPanel").innerHTML = `<div class="hint">当前没有 NeedReview 项。后续如果 AI 标出低置信或边界冲突，会显示在这里。</div>`;
+    target.innerHTML = `<div class="hint">${emptyText}</div>`;
     return;
   }
-  $("needReviewPanel").innerHTML = `
+  target.innerHTML = `
     <div class="review-queue-head">
       <strong>${items.length} 条需复核</strong>
       <span class="hint">你只需要判断：证据是否支持、归属是否正确、规则是否要改。</span>
@@ -681,8 +903,8 @@ async function createProject() {
   };
   const data = await request("/api/projects", { method: "POST", json: payload });
   state.currentProjectId = data.project.id;
+  state.activePage = "upload";
   await loadProjects();
-  document.getElementById("stepUpload").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function deleteProject(projectId, name) {
@@ -716,8 +938,8 @@ async function uploadReviews() {
     </details>
   `;
   await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: Number($("batchSize").value || 25) } });
+  state.activePage = "atomic";
   await loadProjects();
-  document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function formatParseInfo(info) {
@@ -753,6 +975,20 @@ async function makeBatches(options = {}) {
   await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: size } });
   await loadProject(state.currentProjectId);
   if (!options.silent) document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function loadFullReviews() {
+  if (!state.currentProjectId) throw new Error("请先选择项目");
+  const data = await request(`/api/projects/${state.currentProjectId}/reviews`);
+  state.fullReviews = data.reviews || [];
+  renderReviewRows(state.fullReviews, false);
+}
+
+async function loadFullAtomicRows() {
+  if (!state.currentProjectId) throw new Error("请先选择项目");
+  const data = await request(`/api/projects/${state.currentProjectId}/atomic-results`);
+  state.fullAtomic = data.atomic_results || [];
+  renderAtomicRows(state.fullAtomic);
 }
 
 async function runBatch(batchId, options = {}) {
@@ -814,8 +1050,9 @@ async function proposeDimensions() {
     headers: key ? { "X-DeepSeek-Key": key } : {},
   });
   await loadProject(state.currentProjectId);
-  showLog("维度草案已生成。请在第 5 步的可编辑表单中检查、修改，再保存为锁定规则。");
-  document.getElementById("stepLock").scrollIntoView({ behavior: "smooth", block: "start" });
+  state.activePage = "lock";
+  showPage("lock");
+  showLog("维度草案已生成。请在“锁定规则”页的可编辑表单中检查、修改，再保存为锁定规则。");
 }
 
 async function saveDimensions() {
@@ -834,7 +1071,7 @@ async function saveDimensions() {
   });
   await loadProject(state.currentProjectId);
   showLog("规则已锁定。现在可以进入第 6 步最终打标。");
-  document.getElementById("stepFinal").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("final");
 }
 
 async function unlockDimensions() {
@@ -842,7 +1079,7 @@ async function unlockDimensions() {
   const data = await request(`/api/projects/${state.currentProjectId}/unlock-dimensions`, { method: "POST", json: {} });
   await loadProject(state.currentProjectId);
   showLog(data.message || data);
-  document.getElementById("stepLock").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("lock");
 }
 
 async function generateAnalysis() {
@@ -850,7 +1087,7 @@ async function generateAnalysis() {
   const data = await request(`/api/projects/${state.currentProjectId}/analysis`, { method: "POST", json: {} });
   await loadProject(state.currentProjectId);
   showLog("已生成细分维度与优化切入口，下载 Excel 时会一起带出。");
-  document.getElementById("stepAnalysis").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("analysis");
 }
 
 async function runAllAtomic() {
@@ -863,6 +1100,15 @@ async function runAllAtomic() {
   showLog(`已完成 ${pending.length} 个后台批次的最小语义提取。`);
 }
 
+async function runCalibrationAtomic() {
+  const batches = state.currentProject?.batches || [];
+  const pending = batches.filter((b) => !["done", "done_with_warnings", "final_done", "final_done_with_warnings"].includes(b.status));
+  if (!pending.length) throw new Error("没有待处理的校准批次");
+  const first = pending[0];
+  await runBatch(first.id, { silent: true });
+  showLog(`已完成校准批次 ${first.id}（${first.review_count} 条）。请先检查最小语义、信号池和 NeedReview，再决定是否跑全部。`);
+}
+
 async function runAllFinal() {
   const batches = state.currentProject?.batches || [];
   const pending = batches.filter((b) => !["final_done", "final_done_with_warnings"].includes(b.status));
@@ -871,7 +1117,7 @@ async function runAllFinal() {
     await runFinalBatch(b.id, { silent: true });
   }
   showLog(`已完成 ${pending.length} 个后台批次的最终打标。`);
-  document.getElementById("stepAnalysis").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("analysis");
 }
 
 function escapeHtml(value) {
@@ -890,22 +1136,28 @@ function bindEvents() {
     renderApiKeyStatus();
     renderWorkflow(state.currentProject);
   });
+  renderPageTabs();
+  bindSubTabs();
   $("newProjectBtn").addEventListener("click", () => {
     state.currentProjectId = null;
     state.currentProject = null;
+    state.activePage = "project";
     renderEmpty();
     $("projectName").focus();
   });
   $("refreshBtn").addEventListener("click", () => loadProjects().catch(showLog));
-  $("createProjectBtn").addEventListener("click", () => withBusy("正在创建项目...", createProject).catch(showLog));
-  $("uploadBtn").addEventListener("click", () => withBusy("正在上传并识别 Review...", uploadReviews).catch(showLog));
+  $("createProjectBtn").addEventListener("click", () => withBusy("正在创建项目...", createProject, "projectStatus").catch(showLog));
+  $("uploadBtn").addEventListener("click", () => withBusy("正在上传并识别 Review...", uploadReviews, "uploadStatus").catch(showLog));
+  $("loadReviewRowsBtn").addEventListener("click", () => withBusy("正在加载全量 Review 表...", loadFullReviews, "uploadStatus").catch(showLog));
+  $("loadAtomicRowsBtn").addEventListener("click", () => withBusy("正在加载全量最小语义表...", loadFullAtomicRows, "atomicStatus").catch(showLog));
   if ($("makeBatchesBtn")) $("makeBatchesBtn").addEventListener("click", () => makeBatches().catch(showLog));
-  $("runAllAtomicBtn").addEventListener("click", () => withBusy("正在逐批提取最小语义标签，请不要重复点击...", runAllAtomic).catch(showLog));
-  $("runAllFinalBtn").addEventListener("click", () => withBusy("正在逐批最终打标，请不要重复点击...", runAllFinal).catch(showLog));
-  $("proposeDimensionsBtn").addEventListener("click", () => withBusy("正在生成维度草案，请等待结果...", proposeDimensions).catch(showLog));
-  $("saveDimensionsBtn").addEventListener("click", () => withBusy("正在保存并锁定规则...", saveDimensions).catch(showLog));
-  $("unlockDimensionsBtn").addEventListener("click", () => withBusy("正在解除锁定并回到草案...", unlockDimensions).catch(showLog));
-  $("generateAnalysisBtn").addEventListener("click", () => withBusy("正在生成细分维度和优化切入口...", generateAnalysis).catch(showLog));
+  $("runCalibrationAtomicBtn").addEventListener("click", () => withBusy("正在提取校准批次，请不要重复点击...", runCalibrationAtomic, "atomicStatus").catch(showLog));
+  $("runAllAtomicBtn").addEventListener("click", () => withBusy("正在逐批提取最小语义标签，请不要重复点击...", runAllAtomic, "atomicStatus").catch(showLog));
+  $("runAllFinalBtn").addEventListener("click", () => withBusy("正在逐批最终打标，请不要重复点击...", runAllFinal, "finalStatus").catch(showLog));
+  $("proposeDimensionsBtn").addEventListener("click", () => withBusy("正在生成维度草案，请等待结果...", proposeDimensions, "draftStatus").catch(showLog));
+  $("saveDimensionsBtn").addEventListener("click", () => withBusy("正在保存并锁定规则...", saveDimensions, "lockStatus").catch(showLog));
+  $("unlockDimensionsBtn").addEventListener("click", () => withBusy("正在解除锁定并回到草案...", unlockDimensions, "lockStatus").catch(showLog));
+  $("generateAnalysisBtn").addEventListener("click", () => withBusy("正在生成细分维度和优化切入口...", generateAnalysis, "analysisStatus").catch(showLog));
 }
 
 if (location.protocol === "file:") {
