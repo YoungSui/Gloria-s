@@ -9,6 +9,7 @@ let state = {
   activePage: "project",
   fullReviews: null,
   fullAtomic: null,
+  jobPollTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -199,6 +200,64 @@ async function withBusy(text, task, statusId = "") {
   }
 }
 
+function isBackgroundJobRunning(job) {
+  return Boolean(job && ["starting", "running"].includes(job.status));
+}
+
+function backendStatusText(job) {
+  if (!job || !job.status) return "当前未处理";
+  const done = Number(job.completed_batches || 0);
+  const total = Number(job.total_batches || 0);
+  const failed = Number(job.failed_batches || 0);
+  if (isBackgroundJobRunning(job)) {
+    return `后台处理中：${done}/${total} 批完成${failed ? `，${failed} 批失败` : ""}${job.current_batch ? `，当前 ${job.current_batch}` : ""}`;
+  }
+  if (job.status === "done") return `后台任务完成：${done}/${total} 批已完成`;
+  if (job.status === "done_with_errors") return `后台任务完成但有失败：${done}/${total} 批完成，${failed} 批失败`;
+  if (job.status === "failed") return `后台任务失败：${job.error || "未知错误"}`;
+  return `后台状态：${job.status}`;
+}
+
+function renderJobStatus(job) {
+  const isRunning = isBackgroundJobRunning(job);
+  const targetId = job?.kind === "final" ? "finalStatus" : "atomicStatus";
+  const target = $(targetId);
+  if (target && job?.kind) {
+    target.textContent = backendStatusText(job);
+    target.className = `local-run-status ${isRunning ? "running" : "idle"}`;
+  }
+  ["runCalibrationAtomicBtn", "runAllAtomicBtn", "runAllFinalBtn"].forEach((id) => {
+    const node = $(id);
+    if (node) node.disabled = isRunning;
+  });
+  if (isRunning) startJobPolling();
+}
+
+function startJobPolling() {
+  if (state.jobPollTimer || !state.currentProjectId) return;
+  state.jobPollTimer = setInterval(() => {
+    refreshJobStatus().catch(() => {});
+  }, 5000);
+}
+
+function stopJobPolling() {
+  if (state.jobPollTimer) clearInterval(state.jobPollTimer);
+  state.jobPollTimer = null;
+}
+
+async function refreshJobStatus() {
+  if (!state.currentProjectId) {
+    stopJobPolling();
+    return;
+  }
+  const data = await request(`/api/projects/${state.currentProjectId}/job-status`);
+  renderJobStatus(data.job_status || {});
+  if (!isBackgroundJobRunning(data.job_status)) {
+    stopJobPolling();
+    await loadProject(state.currentProjectId);
+  }
+}
+
 function renderPageTabs() {
   const box = $("pageTabs");
   if (!box) return;
@@ -216,6 +275,8 @@ function showPage(key) {
     page.classList.toggle("active", page.dataset.page === state.activePage);
   });
   renderPageTabs();
+  const active = document.querySelector(`.workspace-page[data-page="${state.activePage}"]`);
+  if (active) active.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function bindSubTabs(root = document) {
@@ -315,6 +376,7 @@ function renderEmpty() {
   $("dimensionJson").value = "";
   $("exportLink").classList.add("disabled");
   $("exportLinkBottom").classList.add("disabled");
+  stopJobPolling();
   showPage(state.activePage || "project");
 }
 
@@ -337,6 +399,7 @@ function renderProject(data) {
   renderNeedReviewPanels(data.need_review_items || []);
   renderReviewRows(data.reviews || [], true);
   renderAnalysisPreview(data.analysis_summary || {});
+  renderJobStatus(data.job_status || {});
   bindSubTabs();
   showPage(state.activePage || "project");
   if (state.busy) setBusy(state.busyText, state.busyStatusId);
@@ -1027,7 +1090,7 @@ async function runFinalBatch(batchId, options = {}) {
   try {
     const data = await request(`/api/projects/${state.currentProjectId}/batches/${batchId}/label-final`, {
       method: "POST",
-      json: { model: $("accurateModel").value.trim() || "deepseek-v4-pro", mock },
+      json: { model: $("fastModel").value.trim() || "deepseek-v4-flash", mock },
       headers: key ? { "X-DeepSeek-Key": key } : {},
     });
     if (!options.silent) showLog(data);
@@ -1091,33 +1154,34 @@ async function generateAnalysis() {
 }
 
 async function runAllAtomic() {
-  const batches = state.currentProject?.batches || [];
-  const pending = batches.filter((b) => !["done", "done_with_warnings", "final_done", "final_done_with_warnings"].includes(b.status));
-  if (!pending.length) throw new Error("没有待处理的最小语义提取批次");
-  for (const b of pending) {
-    await runBatch(b.id, { silent: true });
-  }
-  showLog(`已完成 ${pending.length} 个后台批次的最小语义提取。`);
+  await startProjectJob("atomic", "all", $("fastModel").value.trim() || "deepseek-v4-flash", "atomicStatus");
 }
 
 async function runCalibrationAtomic() {
-  const batches = state.currentProject?.batches || [];
-  const pending = batches.filter((b) => !["done", "done_with_warnings", "final_done", "final_done_with_warnings"].includes(b.status));
-  if (!pending.length) throw new Error("没有待处理的校准批次");
-  const first = pending[0];
-  await runBatch(first.id, { silent: true });
-  showLog(`已完成校准批次 ${first.id}（${first.review_count} 条）。请先检查最小语义、信号池和 NeedReview，再决定是否跑全部。`);
+  await startProjectJob("atomic", "calibration", $("fastModel").value.trim() || "deepseek-v4-flash", "atomicStatus");
 }
 
 async function runAllFinal() {
-  const batches = state.currentProject?.batches || [];
-  const pending = batches.filter((b) => !["final_done", "final_done_with_warnings"].includes(b.status));
-  if (!pending.length) throw new Error("没有待处理的最终打标后台批次");
-  for (const b of pending) {
-    await runFinalBatch(b.id, { silent: true });
+  await startProjectJob("final", "all", $("fastModel").value.trim() || "deepseek-v4-flash", "finalStatus");
+}
+
+async function startProjectJob(kind, scope, model, statusId) {
+  if (!state.currentProjectId) throw new Error("请先选择项目");
+  const key = clientApiKey();
+  const mock = $("mockRun").checked;
+  if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key。线上版需要先在服务端配置 Key。");
+  const data = await request(`/api/projects/${state.currentProjectId}/jobs`, {
+    method: "POST",
+    json: { kind, scope, model, mock },
+    headers: key ? { "X-DeepSeek-Key": key } : {},
+  });
+  const job = data.job_status || {};
+  renderJobStatus(job);
+  if (statusId && $(statusId)) {
+    $(statusId).textContent = backendStatusText(job);
+    $(statusId).className = "local-run-status running";
   }
-  showLog(`已完成 ${pending.length} 个后台批次的最终打标。`);
-  showPage("analysis");
+  startJobPolling();
 }
 
 function escapeHtml(value) {
