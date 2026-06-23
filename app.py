@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 import urllib.request
@@ -35,10 +36,10 @@ USAGE_MARKS = ["产品表现", "用户/关系", "场景/目的", "使用工具/�
 SENTIMENTS = ["P", "N", "M", "事实提及", "Drop"]
 
 SKILL_RULE = """你是 VOC 语义打标专家。
-任务是逐条完整阅读 Review 原文，提取原子标签。
+任务是逐条完整阅读 Review 原文，提取最小语义标签。
 禁止关键词匹配式打标。关键词只能提醒你检查语义，不能决定标签。
 英文原文是主证据，中文翻译只能辅助。
-原子标签是 Review 有效信息片段的精炼中文短句，不是完整翻译，也不是维度归纳。
+最小语义标签是 Review 有效信息片段的精炼中文短句，不是完整翻译，也不是维度归纳。
 不能加入原文没有的信息。不能过度泛化。必须保留关键对象、场景、工具、用户、产品表现和结果。
 服务、物流、包装、二手到手状态等外部因素不要误标为产品表现；可进入 drop_records 或其他用途标记。
 输出必须是严格 JSON，不要输出 Markdown。"""
@@ -99,6 +100,23 @@ def update_project(project_id: str, patch: dict):
             save_projects(projects)
             return projects[i]
     return None
+
+
+def delete_project(project_id: str):
+    projects = load_projects()
+    project = next((p for p in projects if p.get("id") == project_id), None)
+    if not project:
+        return None
+    save_projects([p for p in projects if p.get("id") != project_id])
+    src = project_dir(project_id)
+    if src.exists():
+        deleted_dir = DATA_DIR / "_deleted_projects"
+        deleted_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dst = deleted_dir / f"{stamp}-{project_id}"
+        shutil.move(str(src), str(dst))
+        write_json(dst / "deleted_project_meta.json", {"deleted_at": now_iso(), "project": project})
+    return project
 
 
 def body_json(handler) -> dict:
@@ -166,7 +184,7 @@ def login_page():
 <body>
   <form id="loginForm">
     <h1>VOC 语义打标工具</h1>
-    <p>请输入访问码。DeepSeek API Key 不在这里填写，进入工具后在左侧输入或使用服务端环境变量。</p>
+    <p>请输入访问码。DeepSeek API Key 已由服务端配置，页面不会展示或保存密钥。</p>
     <input id="code" type="password" autocomplete="current-password" placeholder="访问码" autofocus />
     <button>进入工具</button>
     <div id="error" class="error"></div>
@@ -576,7 +594,7 @@ def atomic_prompt(project: dict, reviews: list[dict]) -> list[dict]:
     project_block = {
         "product_name": project.get("name", ""),
         "product_category": project.get("category", ""),
-        "analysis_goal": "先发现式拆解原子标签，不生成最终维度。",
+        "analysis_goal": "先发现式拆解最小语义标签，不生成最终维度。",
         "usage_marks_allowed": USAGE_MARKS,
         "sentiments_allowed": SENTIMENTS,
     }
@@ -693,7 +711,7 @@ def mock_atomic_extract(reviews: list[dict]):
                 "review_id": r["review_id"],
                 "atomic_tags": tags,
                 "drop_records": drops,
-                "review_flags": ["模拟运行结果，不作为正式打标"] if tags or drops else ["未识别出高置信原子标签"],
+                "review_flags": ["模拟运行结果，不作为正式打标"] if tags or drops else ["未识别出高置信最小语义标签"],
                 "need_review": True,
             }
         )
@@ -729,7 +747,7 @@ def propose_dimensions(project_id: str):
     product = sorted(product_counter.items(), key=lambda x: (-x[1], x[0]))[:80]
     context = sorted(context_counter.items(), key=lambda x: (-x[1], x[0]))[:80]
     candidates = {
-        "note": "基于原子标签频次生成的候选池。维度定义仍需要 DeepSeek 语义归类和人工锁定。",
+        "note": "基于最小语义标签频次生成的候选池。维度定义仍需要 DeepSeek 语义归类和人工锁定。",
         "product_atomic_pool": [{"atomic_tag": k, "count": v} for k, v in product],
         "context_atomic_pool": [{"atomic_tag": k, "count": v} for k, v in context],
     }
@@ -760,7 +778,7 @@ def dimension_model_prompt(project: dict, candidates: dict, atomic: list[dict]) 
         "candidates": candidates,
         "atomic_evidence_sample": compact_atomic,
         "requirements": [
-            "不要按关键词机械聚类，要理解原子标签背后的购买决策问题。",
+            "不要按关键词机械聚类，要理解最小语义标签背后的购买决策问题。",
             "产品购买决策维度必须是买家会用来判断是否购买/留下/退货的一级问题。",
             "Context 字段必须是人群、场景、用途、购买路径、使用阻碍等背景信息，不要混入产品性能。",
             "维度数量不要过多。产品购买决策维度建议 6-10 个，Context 字段建议 8-14 个。",
@@ -809,7 +827,7 @@ def mock_dimension_model(candidates: dict):
         "decision_dimensions": [
             {
                 "name_zh": f"待确认产品维度{i+1}",
-                "definition_zh": f"由原子标签“{item.get('atomic_tag', '')}”触发的候选维度，需要人工改名和补边界。",
+                "definition_zh": f"由最小语义标签“{item.get('atomic_tag', '')}”触发的候选维度，需要人工改名和补边界。",
                 "decision_question_zh": "这个产品表现是否会影响买家购买或留用判断？",
                 "p_rule_zh": "原文明确表达该表现满足或优于预期。",
                 "n_rule_zh": "原文明确表达该表现失败、限制使用或低于预期。",
@@ -824,7 +842,7 @@ def mock_dimension_model(candidates: dict):
         "context_fields": [
             {
                 "name_zh": f"待确认Context{i+1}",
-                "definition_zh": f"由原子标签“{item.get('atomic_tag', '')}”触发的候选 Context。",
+                "definition_zh": f"由最小语义标签“{item.get('atomic_tag', '')}”触发的候选 Context。",
                 "evidence_required_zh": "必须有原文明确背景证据。",
                 "boundary_zh": "模拟草案，仅用于检查流程，不可直接作为最终规则。",
                 "source_atomic_tags": [item.get("atomic_tag", "")],
@@ -898,7 +916,7 @@ def rule_source_stats(project_id: str):
                     "source_tag_count": len(source_tags),
                     "mention_count": len(review_ids),
                     "mention_rate": round(len(review_ids) / total, 4),
-                    "sort_basis": "按来源原子标签覆盖的 Review 数降序",
+                    "sort_basis": "按来源最小语义标签覆盖的 Review 数降序",
                 }
             )
         return sorted(rows, key=lambda x: (-x["mention_count"], x["name_zh"]))
@@ -984,7 +1002,7 @@ def need_review_items(project_id: str, limit: int = 80):
         rid = row.get("review_id", "")
         items.append(
             {
-                "stage": "原子标签",
+                "stage": "最小语义标签",
                 "review_id": rid,
                 "reason": "；".join(row.get("review_flags", []) or []) or "低置信或边界不清",
                 "evidence": evidence,
@@ -1133,7 +1151,7 @@ def final_label_prompt(project: dict, rules: dict, reviews: list[dict], atomic_r
             for r in reviews
         ],
         "requirements": [
-            "必须逐条完整阅读 review_original，原子标签只是辅助线索，不能替代原文判断。",
+            "必须逐条完整阅读 review_original，最小语义标签只是辅助线索，不能替代原文判断。",
             "英文原文是主证据；已有中文翻译不可靠时必须忽略。",
             "每个购买决策维度都要输出 T=P/N/M/0；T=0 时 R 和 atomic_value_zh 都写“无”。",
             "R 必须是中文证据摘要，不要整段英文；atomic_value_zh 是比 R 更短的原子属性。",
@@ -1262,7 +1280,7 @@ def build_export(project_id: str):
         ["产品品类", project.get("category", "") if project else ""],
         ["评论数", len(reviews)],
         ["批次数", len(batches)],
-        ["原子标签记录数", sum(len(x.get("atomic_tags", [])) for x in atomic)],
+        ["最小语义标签记录数", sum(len(x.get("atomic_tags", [])) for x in atomic)],
         ["NeedReview", sum(1 for x in atomic if x.get("need_review"))],
         ["导出时间", now_iso()],
     ]
@@ -1305,8 +1323,8 @@ def build_export(project_id: str):
     for r in reviews:
         ws.append([r.get("seq"), r.get("review_id"), r.get("model"), r.get("star"), r.get("review_original"), r.get("review_translation_zh"), r.get("review_link")])
 
-    ws = wb.create_sheet("原子标签明细")
-    ws.append(["ReviewID", "批次", "原子标签", "初始倾向", "用途标记", "原文证据", "置信度", "NeedReview", "复核标记"])
+    ws = wb.create_sheet("最小语义标签明细")
+    ws.append(["ReviewID", "批次", "最小语义标签", "初始倾向", "用途标记", "原文证据", "置信度", "NeedReview", "复核标记"])
     for row in atomic:
         for tag in row.get("atomic_tags", []) or []:
             ws.append(
@@ -1329,12 +1347,12 @@ def build_export(project_id: str):
         for drop in row.get("drop_records", []) or []:
             ws.append([row.get("review_id"), row.get("batch_id"), drop.get("text"), drop.get("drop_reason")])
 
-    ws = wb.create_sheet("候选维度池")
-    ws.append(["类型", "原子标签", "提及次数"])
+    ws = wb.create_sheet("候选语义池")
+    ws.append(["类型", "最小语义标签", "提及次数"])
     for item in candidates.get("product_atomic_pool", []):
-        ws.append(["产品表现原子池", item["atomic_tag"], item["count"]])
+        ws.append(["产品表现信号池", item["atomic_tag"], item["count"]])
     for item in candidates.get("context_atomic_pool", []):
-        ws.append(["Context原子池", item["atomic_tag"], item["count"]])
+        ws.append(["背景信号池", item["atomic_tag"], item["count"]])
 
     ws = wb.create_sheet("维度提及率")
     ws.append(["阶段", "类型", "维度/字段", "提及Review数", "提及率", "P数", "N数", "M数", "排序口径"])
@@ -1407,7 +1425,7 @@ def build_export(project_id: str):
         )
 
     ws = wb.create_sheet("维度规则草案")
-    ws.append(["类型", "名称", "定义", "P规则/证据要求", "N规则", "M规则", "0规则", "边界", "来源原子标签", "运营用途"])
+    ws.append(["类型", "名称", "定义", "P规则/证据要求", "N规则", "M规则", "0规则", "边界", "来源最小语义标签", "运营用途"])
     for item in dimension_model.get("decision_dimensions", []):
         ws.append(
             [
@@ -1613,7 +1631,7 @@ class Handler(SimpleHTTPRequestHandler):
             reset_after_reviews_upload(project_id)
             write_json(project_dir(project_id) / "reviews.json", reviews)
             project = update_project(project_id, {"stage": "reviews_imported"})
-            send_json(self, {"project": project, "stats": project_stats(project_id), "sample": reviews[:5], "parse_info": parse_info})
+            send_json(self, {"project": project, "stats": project_stats(project_id), "sample": reviews[:10], "parse_info": parse_info})
             return
 
         m = re.match(r"^/api/projects/([^/]+)/batches$", path)
@@ -1823,6 +1841,22 @@ class Handler(SimpleHTTPRequestHandler):
 
         send_json(self, {"error": "not_found"}, 404)
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not has_access(self):
+            send_json(self, {"error": "unauthorized"}, 401)
+            return
+        m = re.match(r"^/api/projects/([^/]+)$", path)
+        if m:
+            project = delete_project(m.group(1))
+            if not project:
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            send_json(self, {"status": "ok", "deleted_project": project})
+            return
+        send_json(self, {"error": "not_found"}, 404)
+
 
 def main():
     ensure_dirs()
@@ -1830,7 +1864,7 @@ def main():
     port = int(os.environ.get("VOC_PORT") or os.environ.get("PORT") or "8787")
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"VOC Web Tool running at http://{host}:{port}")
-    print("Set DEEPSEEK_API_KEY in environment or paste it in the browser run panel.")
+    print("Set DEEPSEEK_API_KEY in environment before running formal labeling.")
     httpd.serve_forever()
 
 
