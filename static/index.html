@@ -20,16 +20,14 @@
         <button id="newProjectBtn" class="primary full">新建一个分析项目</button>
 
         <div class="panel compact key-panel">
-          <div class="mini-title">0. 设置 DeepSeek</div>
-          <label for="apiKey">DeepSeek API Key</label>
-          <input id="apiKey" type="password" placeholder="服务端未配置时再临时粘贴" />
+          <div class="mini-title">0. 访问保护</div>
+          <input id="apiKey" type="password" hidden />
           <div id="apiKeyStatus" class="step-state wait">未填写</div>
-          <div class="hint">优先使用服务端 API。临时粘贴的 Key 只保存在当前浏览器，不写入项目文件。</div>
-          <label class="checkbox">
+          <div class="hint">页面已启用访问码。DeepSeek Key 只保存在服务端，页面不展示、不粘贴、不写入项目。</div>
+          <label class="checkbox" hidden>
             <input id="mockRun" type="checkbox" />
             模拟运行，不消耗 API
           </label>
-          <div class="hint">正式打标时取消勾选。</div>
         </div>
 
         <div class="sidebar-section">
@@ -42,7 +40,7 @@
         <section class="topbar">
           <div>
             <h2 id="projectTitle">请选择或新建项目</h2>
-            <p id="projectSubtitle">从左侧开始：确认 API → 建项目 → 上传 Review → 按顺序点击每一步。</p>
+            <p id="projectSubtitle">从左侧开始：确认访问保护 → 建项目 → 上传 Review → 按顺序点击每一步。</p>
           </div>
           <div class="top-actions">
             <button id="refreshBtn">刷新状态</button>
@@ -56,7 +54,10 @@
               <h3>操作顺序</h3>
               <p class="hint">只要按从左到右的顺序完成即可。绿色代表已完成，蓝色代表下一步。</p>
             </div>
-            <div id="nextAction" class="next-action">下一步：填写 API Key 或勾选模拟运行</div>
+            <div>
+              <div id="nextAction" class="next-action">下一步：创建项目</div>
+              <div id="runStatus" class="run-status idle">当前没有后台任务运行</div>
+            </div>
           </div>
           <div id="flowSteps" class="flow-steps"></div>
         </section>
@@ -71,7 +72,7 @@
             <strong id="mBatches">0</strong>
           </div>
           <div class="metric">
-            <span>原子标签</span>
+            <span>最小语义标签</span>
             <strong id="mAtomic">0</strong>
           </div>
           <div class="metric">
@@ -124,7 +125,7 @@
           </div>
           <div class="form-grid two">
             <label>
-              快速模型，用于原子标签
+              快速模型，用于最小语义标签
               <input id="fastModel" value="deepseek-v4-flash" />
             </label>
             <label>
@@ -167,22 +168,22 @@
           <div class="step-head">
             <div class="step-no">3</div>
             <div>
-              <h3>提取原子标签</h3>
-              <p class="hint">这一步让 AI 逐条读原文，只拆最小语义事实，不直接下最终维度结论。</p>
+              <h3>提取最小语义标签</h3>
+              <p class="hint">这一步让 AI 逐条读原文，只拆最小语义标签，不直接下最终维度结论。</p>
             </div>
             <div id="sAtomic" class="step-state wait">未完成</div>
           </div>
           <div class="action-row">
             <button id="runAllAtomicBtn" class="primary">提取全部待处理批次</button>
-            <span class="hint">正式运行会消耗 DeepSeek API；模拟运行只测流程。</span>
+            <span class="hint">点击后请等待处理中状态结束，避免重复点击造成重复消耗。</span>
           </div>
           <div class="grid two compact-grid">
             <div>
-              <div class="mini-title">最近原子标签</div>
+              <div class="mini-title">最近最小语义标签（预览，不是全量）</div>
               <div id="atomicPreview" class="preview tall"></div>
             </div>
             <div>
-              <div class="mini-title">候选原子池</div>
+              <div class="mini-title">候选语义池（按提及频次）</div>
               <div id="dimensionPool" class="pool tall"></div>
             </div>
           </div>
@@ -193,13 +194,13 @@
             <div class="step-no">4</div>
             <div>
               <h3>生成维度草案</h3>
-              <p class="hint">AI 会把原子标签归纳成购买决策维度和 Context 字段。这里是草案，不是最终规则。</p>
+              <p class="hint">AI 会把最小语义标签归纳成购买决策维度和 Context 字段。这里是草案，不是最终规则。</p>
             </div>
             <div id="sDraft" class="step-state wait">未完成</div>
           </div>
           <div class="action-row">
             <button id="proposeDimensionsBtn" class="primary">生成维度草案</button>
-            <span class="hint">生成后先看下面的可读卡片，不需要直接看 JSON。</span>
+            <span class="hint">生成后先看下面的可读卡片和第 5 步可编辑表单，不需要看技术格式。</span>
           </div>
           <div id="dimensionCards" class="dimension-cards"></div>
         </section>
@@ -221,17 +222,18 @@
           <details class="details-box" open>
             <summary>如果不同意 AI 的维度划分，怎么改</summary>
             <div class="edit-rules">
-              <div><strong>改名：</strong>只改 <code>name_zh</code>，让名字更贴近业务语言。</div>
-              <div><strong>删除：</strong>删除不该成为一级维度的整段对象。</div>
-              <div><strong>合并：</strong>保留更准确的那个维度，把另一个维度的 <code>source_atomic_tags</code> 合进去，并同步改定义和边界。</div>
-              <div><strong>拆分：</strong>复制一段维度对象，分别改名称、定义、P/N/M/0 规则和来源原子标签。</div>
-              <div><strong>改边界：</strong>重点改 <code>p_rule_zh / n_rule_zh / m_rule_zh / zero_rule_zh / boundary_zh</code>，避免后续打标跑偏。</div>
+              <div><strong>改名：</strong>直接改“维度名称”。</div>
+              <div><strong>删除：</strong>点“删除这个维度”。不该成为一级维度、样本太散、不能指导运营的都可以删。</div>
+              <div><strong>合并：</strong>把两个维度的名称和边界改成一个更准确的大维度，再删除另一个。</div>
+              <div><strong>拆分：</strong>点“新增购买决策维度”或“新增 Context 字段”，把原维度中不同含义拆出来。</div>
+              <div><strong>改边界：</strong>重点改正向、负向、中性、未提及、边界，避免后续打标跑偏。</div>
               <div><strong>Context：</strong>只放人群、场景、用途、购买路径、使用阻碍等背景，不放产品性能好坏。</div>
             </div>
           </details>
+          <div id="ruleEditor" class="rule-editor"></div>
           <details class="details-box">
-            <summary>高级编辑：直接修改维度规则 JSON</summary>
-            <textarea id="dimensionJson" class="json-editor" rows="16" placeholder="维度草案会显示在这里，可人工修改后保存"></textarea>
+            <summary>规则备份区（一般不用打开）</summary>
+            <textarea id="dimensionJson" class="json-editor" rows="16" placeholder="这里是规则备份内容；日常只改上方表单。"></textarea>
           </details>
         </section>
 
