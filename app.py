@@ -415,19 +415,75 @@ def project_stats(project_id: str):
     batches = read_json(project_dir(project_id) / "batches.json", [])
     atomic = read_json(project_dir(project_id) / "atomic_results.json", [])
     final_labels = read_json(project_dir(project_id) / "final_labels.json", [])
-    locked = read_json(project_dir(project_id) / "locked_dimensions.json", {})
+    locked = read_locked_rules(project_id)
+    analysis = read_json(project_dir(project_id) / "analysis_summary.json", {})
     review_tokens = sum(estimate_tokens(r.get("review_original", "")) for r in reviews)
+    atomic_need_review = sum(1 for x in atomic if x.get("need_review"))
+    final_need_review = sum(1 for x in final_labels if x.get("need_review"))
     return {
         "reviews": len(reviews),
         "batches": len(batches),
         "atomic_records": sum(len(x.get("atomic_tags", [])) for x in atomic),
         "drop_records": sum(len(x.get("drop_records", [])) for x in atomic),
-        "need_review": sum(1 for x in atomic if x.get("need_review")),
+        "need_review": atomic_need_review + final_need_review,
+        "atomic_need_review": atomic_need_review,
+        "final_need_review": final_need_review,
         "final_labeled": len(final_labels),
         "locked_decision_dimensions": len(locked.get("decision_dimensions", []) or []),
         "locked_context_fields": len(locked.get("context_fields", []) or []),
+        "analysis_ready": bool(analysis.get("generated_at")),
+        "analysis_records": len(analysis.get("decision_subdimensions", []) or []) + len(analysis.get("context_subdimensions", []) or []),
         "approx_review_tokens": review_tokens,
     }
+
+
+def archive_and_remove(project_id: str, filenames: list[str]) -> None:
+    base = project_dir(project_id)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive_dir = base / "archive" / stamp
+    moved = False
+    for name in filenames:
+        path = base / name
+        if not path.exists():
+            continue
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        path.replace(archive_dir / name)
+        moved = True
+    if moved:
+        write_json(archive_dir / "archive_note.json", {"archived_at": now_iso(), "reason": "new upstream data invalidated downstream outputs"})
+
+
+def reset_after_reviews_upload(project_id: str) -> None:
+    archive_and_remove(
+        project_id,
+        [
+            "reviews.json",
+            "batches.json",
+            "atomic_results.json",
+            "dimension_candidates.json",
+            "dimension_model.json",
+            "locked_dimensions.json",
+            "final_labels.json",
+            "analysis_summary.json",
+        ],
+    )
+
+
+def reset_after_atomic_change(project_id: str) -> None:
+    archive_and_remove(project_id, ["dimension_model.json", "locked_dimensions.json", "final_labels.json", "analysis_summary.json"])
+
+
+def reset_after_dimension_change(project_id: str) -> None:
+    archive_and_remove(project_id, ["final_labels.json", "analysis_summary.json"])
+
+
+def is_locked_rules(data: dict) -> bool:
+    return bool(data.get("locked_at") and ((data.get("decision_dimensions") or []) or (data.get("context_fields") or [])))
+
+
+def read_locked_rules(project_id: str) -> dict:
+    data = read_json(project_dir(project_id) / "locked_dimensions.json", {})
+    return data if is_locked_rules(data) else {}
 
 
 def make_batches(project_id: str, batch_size: int):
@@ -655,6 +711,7 @@ def merge_atomic_results(project_id: str, batch_id: str, result: dict, usage: di
         item["usage"] = usage
         existing.append(item)
     write_json(path, existing)
+    reset_after_atomic_change(project_id)
 
 
 def propose_dimensions(project_id: str):
@@ -791,14 +848,15 @@ def generate_dimension_model(project_id: str, api_key: str, model: str, mock: bo
     draft["model"] = model
     draft["usage"] = usage
     draft["generated_at"] = now_iso()
+    archive_and_remove(project_id, ["locked_dimensions.json", "final_labels.json", "analysis_summary.json"])
     write_json(project_dir(project_id) / "dimension_model.json", draft)
     update_project(project_id, {"stage": "dimension_draft_ready"})
     return draft
 
 
 def rules_for_project(project_id: str):
-    locked = read_json(project_dir(project_id) / "locked_dimensions.json", {})
-    if locked.get("decision_dimensions") or locked.get("context_fields"):
+    locked = read_locked_rules(project_id)
+    if locked:
         return locked
     return read_json(project_dir(project_id) / "dimension_model.json", {})
 
@@ -806,6 +864,251 @@ def rules_for_project(project_id: str):
 def atomic_for_review(project_id: str, review_ids: set[str]):
     atomic = read_json(project_dir(project_id) / "atomic_results.json", [])
     return [row for row in atomic if row.get("review_id") in review_ids]
+
+
+def atomic_tag_review_index(atomic: list[dict]):
+    index = {}
+    for row in atomic:
+        rid = row.get("review_id", "")
+        for tag in row.get("atomic_tags", []) or []:
+            text = tag.get("atomic_tag_zh", "")
+            if not text:
+                continue
+            index.setdefault(text, set()).add(rid)
+    return index
+
+
+def rule_source_stats(project_id: str):
+    reviews = read_json(project_dir(project_id) / "reviews.json", [])
+    atomic = read_json(project_dir(project_id) / "atomic_results.json", [])
+    rules = rules_for_project(project_id)
+    tag_index = atomic_tag_review_index(atomic)
+    total = max(len(reviews), 1)
+
+    def stats_for(items):
+        rows = []
+        for item in items:
+            source_tags = item.get("source_atomic_tags", []) or []
+            review_ids = set()
+            for tag in source_tags:
+                review_ids.update(tag_index.get(tag, set()))
+            rows.append(
+                {
+                    "name_zh": item.get("name_zh", ""),
+                    "source_tag_count": len(source_tags),
+                    "mention_count": len(review_ids),
+                    "mention_rate": round(len(review_ids) / total, 4),
+                    "sort_basis": "按来源原子标签覆盖的 Review 数降序",
+                }
+            )
+        return sorted(rows, key=lambda x: (-x["mention_count"], x["name_zh"]))
+
+    return {
+        "decision": stats_for(rules.get("decision_dimensions", []) or []),
+        "context": stats_for(rules.get("context_fields", []) or []),
+    }
+
+
+def final_label_stats(project_id: str):
+    reviews = read_json(project_dir(project_id) / "reviews.json", [])
+    final_labels = read_json(project_dir(project_id) / "final_labels.json", [])
+    rules = rules_for_project(project_id)
+    total = max(len(reviews), 1)
+    decision = []
+    for item in rules.get("decision_dimensions", []) or []:
+        name = item.get("name_zh", "")
+        counts = {"P": 0, "N": 0, "M": 0}
+        review_ids = []
+        for row in final_labels:
+            val = (row.get("dimensions", {}) or {}).get(name, {})
+            t = val.get("T", "0")
+            if t in counts:
+                counts[t] += 1
+                review_ids.append(row.get("review_id", ""))
+        mention_count = sum(counts.values())
+        decision.append(
+            {
+                "name_zh": name,
+                "mention_count": mention_count,
+                "mention_rate": round(mention_count / total, 4),
+                "p_count": counts["P"],
+                "n_count": counts["N"],
+                "m_count": counts["M"],
+                "sort_basis": "按最终打标 T 不为 0 的 Review 数降序",
+            }
+        )
+    context = []
+    for item in rules.get("context_fields", []) or []:
+        name = item.get("name_zh", "")
+        review_ids = []
+        for row in final_labels:
+            val = (row.get("context", {}) or {}).get(name, {})
+            value = str(val.get("value_zh", "")).strip()
+            if value and value not in ["未提及", "无", "0"]:
+                review_ids.append(row.get("review_id", ""))
+        context.append(
+            {
+                "name_zh": name,
+                "mention_count": len(review_ids),
+                "mention_rate": round(len(review_ids) / total, 4),
+                "sort_basis": "按最终打标有明确 Context 值的 Review 数降序",
+            }
+        )
+    return {
+        "decision": sorted(decision, key=lambda x: (-x["mention_count"], x["name_zh"])),
+        "context": sorted(context, key=lambda x: (-x["mention_count"], x["name_zh"])),
+    }
+
+
+def project_dimension_stats(project_id: str):
+    return {
+        "source": rule_source_stats(project_id),
+        "final": final_label_stats(project_id),
+    }
+
+
+def need_review_items(project_id: str, limit: int = 80):
+    reviews = read_json(project_dir(project_id) / "reviews.json", [])
+    review_map = {r.get("review_id"): r for r in reviews}
+    items = []
+    for row in read_json(project_dir(project_id) / "atomic_results.json", []):
+        if not row.get("need_review"):
+            continue
+        evidence = ""
+        tags = row.get("atomic_tags", []) or []
+        drops = row.get("drop_records", []) or []
+        if tags:
+            evidence = tags[0].get("evidence_original", "")
+        elif drops:
+            evidence = drops[0].get("text", "")
+        rid = row.get("review_id", "")
+        items.append(
+            {
+                "stage": "原子标签",
+                "review_id": rid,
+                "reason": "；".join(row.get("review_flags", []) or []) or "低置信或边界不清",
+                "evidence": evidence,
+                "review_original": (review_map.get(rid, {}) or {}).get("review_original", ""),
+            }
+        )
+    for row in read_json(project_dir(project_id) / "final_labels.json", []):
+        if not row.get("need_review"):
+            continue
+        rid = row.get("review_id", "")
+        evidence = ""
+        for val in (row.get("dimensions", {}) or {}).values():
+            if val.get("R") and val.get("R") != "无":
+                evidence = val.get("R")
+                break
+        if not evidence:
+            for val in (row.get("context", {}) or {}).values():
+                if val.get("evidence_zh") and val.get("evidence_zh") != "无":
+                    evidence = val.get("evidence_zh")
+                    break
+        items.append(
+            {
+                "stage": "最终打标",
+                "review_id": rid,
+                "reason": "；".join(row.get("review_flags", []) or []) or "低置信、边界冲突或可能幻觉",
+                "evidence": evidence,
+                "review_original": (review_map.get(rid, {}) or {}).get("review_original", ""),
+            }
+        )
+    return items[:limit]
+
+
+def clean_value(value: str) -> str:
+    text = str(value or "").strip()
+    return text if text and text not in ["无", "未提及", "0"] else ""
+
+
+def entry_point_for_decision(name: str, p_count: int, n_count: int, m_count: int) -> str:
+    if n_count > p_count and n_count > 0:
+        return f"优先检查“{name}”相关差评：Listing 需提前说明限制，产品侧需判断是否为高频缺陷。"
+    if p_count > 0 and p_count >= n_count:
+        return f"可把“{name}”作为卖点候选，用图片/要点展示真实使用收益，同时保留适用边界。"
+    if m_count > 0:
+        return f"用户有事实提及但倾向不强，适合补充规格说明或 FAQ，暂不作为核心卖点。"
+    return "样本较少，先保留观察，不单独形成运营动作。"
+
+
+def build_analysis_summary(project_id: str):
+    reviews = read_json(project_dir(project_id) / "reviews.json", [])
+    final_labels = read_json(project_dir(project_id) / "final_labels.json", [])
+    rules = rules_for_project(project_id)
+    total = max(len(reviews), 1)
+    decision_rows = []
+    context_rows = []
+
+    for dim in rules.get("decision_dimensions", []) or []:
+        name = dim.get("name_zh", "")
+        buckets = {}
+        for row in final_labels:
+            item = (row.get("dimensions", {}) or {}).get(name, {})
+            t = item.get("T", "0")
+            if t == "0":
+                continue
+            value = clean_value(item.get("atomic_value_zh")) or clean_value(item.get("R")) or "未命名细分"
+            bucket = buckets.setdefault(value, {"P": 0, "N": 0, "M": 0, "review_ids": [], "evidence": []})
+            if t in ["P", "N", "M"]:
+                bucket[t] += 1
+            bucket["review_ids"].append(row.get("review_id", ""))
+            if item.get("R") and item.get("R") != "无" and len(bucket["evidence"]) < 3:
+                bucket["evidence"].append(item.get("R"))
+        for value, bucket in buckets.items():
+            count = len(set(bucket["review_ids"]))
+            decision_rows.append(
+                {
+                    "parent_dimension": name,
+                    "subdimension_zh": value,
+                    "mention_count": count,
+                    "mention_rate": round(count / total, 4),
+                    "p_count": bucket["P"],
+                    "n_count": bucket["N"],
+                    "m_count": bucket["M"],
+                    "optimization_entry_zh": entry_point_for_decision(name, bucket["P"], bucket["N"], bucket["M"]),
+                    "evidence_examples": bucket["evidence"],
+                    "review_ids": sorted(set(bucket["review_ids"]))[:20],
+                }
+            )
+
+    for field in rules.get("context_fields", []) or []:
+        name = field.get("name_zh", "")
+        buckets = {}
+        for row in final_labels:
+            item = (row.get("context", {}) or {}).get(name, {})
+            value = clean_value(item.get("value_zh"))
+            if not value:
+                continue
+            bucket = buckets.setdefault(value, {"review_ids": [], "evidence": []})
+            bucket["review_ids"].append(row.get("review_id", ""))
+            if item.get("evidence_zh") and item.get("evidence_zh") != "无" and len(bucket["evidence"]) < 3:
+                bucket["evidence"].append(item.get("evidence_zh"))
+        for value, bucket in buckets.items():
+            count = len(set(bucket["review_ids"]))
+            context_rows.append(
+                {
+                    "context_field": name,
+                    "subdimension_zh": value,
+                    "mention_count": count,
+                    "mention_rate": round(count / total, 4),
+                    "analysis_use_zh": f"用于判断“{name}”下的核心用户/场景/路径，辅助 Listing 信息层级和运营人群判断。",
+                    "evidence_examples": bucket["evidence"],
+                    "review_ids": sorted(set(bucket["review_ids"]))[:20],
+                }
+            )
+
+    decision_rows.sort(key=lambda x: (-x["mention_count"], x["parent_dimension"], x["subdimension_zh"]))
+    context_rows.sort(key=lambda x: (-x["mention_count"], x["context_field"], x["subdimension_zh"]))
+    summary = {
+        "generated_at": now_iso(),
+        "basis": "基于最终打标宽表中的原子属性/Context 值做可追溯统计；未做不可解释的关键词匹配。",
+        "decision_subdimensions": decision_rows,
+        "context_subdimensions": context_rows,
+    }
+    write_json(project_dir(project_id) / "analysis_summary.json", summary)
+    update_project(project_id, {"stage": "analysis_ready"})
+    return summary
 
 
 def final_label_prompt(project: dict, rules: dict, reviews: list[dict], atomic_rows: list[dict]) -> list[dict]:
@@ -943,6 +1246,8 @@ def build_export(project_id: str):
     atomic = read_json(project_dir(project_id) / "atomic_results.json", [])
     candidates = read_json(project_dir(project_id) / "dimension_candidates.json", {})
     dimension_model = read_json(project_dir(project_id) / "dimension_model.json", {})
+    dimension_stats = project_dimension_stats(project_id)
+    analysis = read_json(project_dir(project_id) / "analysis_summary.json", {})
     locked = rules_for_project(project_id)
     final_labels = read_json(project_dir(project_id) / "final_labels.json", [])
     final_by_review = {row.get("review_id"): row for row in final_labels}
@@ -1030,6 +1335,76 @@ def build_export(project_id: str):
         ws.append(["产品表现原子池", item["atomic_tag"], item["count"]])
     for item in candidates.get("context_atomic_pool", []):
         ws.append(["Context原子池", item["atomic_tag"], item["count"]])
+
+    ws = wb.create_sheet("维度提及率")
+    ws.append(["阶段", "类型", "维度/字段", "提及Review数", "提及率", "P数", "N数", "M数", "排序口径"])
+    for stage, block in [("草案来源", dimension_stats.get("source", {})), ("最终打标", dimension_stats.get("final", {}))]:
+        for item in block.get("decision", []) or []:
+            ws.append(
+                [
+                    stage,
+                    "购买决策维度",
+                    item.get("name_zh"),
+                    item.get("mention_count"),
+                    item.get("mention_rate"),
+                    item.get("p_count", ""),
+                    item.get("n_count", ""),
+                    item.get("m_count", ""),
+                    item.get("sort_basis", ""),
+                ]
+            )
+        for item in block.get("context", []) or []:
+            ws.append(
+                [
+                    stage,
+                    "Context",
+                    item.get("name_zh"),
+                    item.get("mention_count"),
+                    item.get("mention_rate"),
+                    "",
+                    "",
+                    "",
+                    item.get("sort_basis", ""),
+                ]
+            )
+
+    ws = wb.create_sheet("NeedReview复核清单")
+    ws.append(["阶段", "ReviewID", "原因", "证据", "Review原文"])
+    for item in need_review_items(project_id, limit=10000):
+        ws.append([item.get("stage"), item.get("review_id"), item.get("reason"), item.get("evidence"), item.get("review_original")])
+
+    ws = wb.create_sheet("决策细分与切入口")
+    ws.append(["父维度", "细分维度/原子属性", "提及Review数", "提及率", "P数", "N数", "M数", "优化切入口", "证据示例", "ReviewID"])
+    for item in analysis.get("decision_subdimensions", []) or []:
+        ws.append(
+            [
+                item.get("parent_dimension"),
+                item.get("subdimension_zh"),
+                item.get("mention_count"),
+                item.get("mention_rate"),
+                item.get("p_count"),
+                item.get("n_count"),
+                item.get("m_count"),
+                item.get("optimization_entry_zh"),
+                "；".join(item.get("evidence_examples", []) or []),
+                "；".join(item.get("review_ids", []) or []),
+            ]
+        )
+
+    ws = wb.create_sheet("Context细分与洞察")
+    ws.append(["Context字段", "细分值/原子属性", "提及Review数", "提及率", "分析用途", "证据示例", "ReviewID"])
+    for item in analysis.get("context_subdimensions", []) or []:
+        ws.append(
+            [
+                item.get("context_field"),
+                item.get("subdimension_zh"),
+                item.get("mention_count"),
+                item.get("mention_rate"),
+                item.get("analysis_use_zh"),
+                "；".join(item.get("evidence_examples", []) or []),
+                "；".join(item.get("review_ids", []) or []),
+            ]
+        )
 
     ws = wb.create_sheet("维度规则草案")
     ws.append(["类型", "名称", "定义", "P规则/证据要求", "N规则", "M规则", "0规则", "边界", "来源原子标签", "运营用途"])
@@ -1148,8 +1523,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "atomic_results": read_json(project_dir(project_id) / "atomic_results.json", [])[:30],
                     "dimension_candidates": read_json(project_dir(project_id) / "dimension_candidates.json", {}),
                     "dimension_model": read_json(project_dir(project_id) / "dimension_model.json", {}),
-                    "locked_dimensions": read_json(project_dir(project_id) / "locked_dimensions.json", {}),
+                    "locked_dimensions": read_locked_rules(project_id),
+                    "dimension_stats": project_dimension_stats(project_id),
+                    "need_review_items": need_review_items(project_id),
                     "final_labels": read_json(project_dir(project_id) / "final_labels.json", [])[:30],
+                    "analysis_summary": read_json(project_dir(project_id) / "analysis_summary.json", {}),
                 },
             )
             return
@@ -1232,6 +1610,7 @@ class Handler(SimpleHTTPRequestHandler):
                     400,
                 )
                 return
+            reset_after_reviews_upload(project_id)
             write_json(project_dir(project_id) / "reviews.json", reviews)
             project = update_project(project_id, {"stage": "reviews_imported"})
             send_json(self, {"project": project, "stats": project_stats(project_id), "sample": reviews[:5], "parse_info": parse_info})
@@ -1285,10 +1664,36 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(decision, list) or not isinstance(context, list):
                 send_json(self, {"error": "invalid_dimensions_payload"}, 400)
                 return
+            reset_after_dimension_change(project_id)
             payload["locked_at"] = now_iso()
             write_json(project_dir(project_id) / "locked_dimensions.json", payload)
             update_project(project_id, {"stage": "dimensions_locked"})
             send_json(self, {"status": "ok", "locked_dimensions": payload, "stats": project_stats(project_id)})
+            return
+
+        m = re.match(r"^/api/projects/([^/]+)/unlock-dimensions$", path)
+        if m:
+            project_id = m.group(1)
+            if not get_project(project_id):
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            archive_and_remove(project_id, ["locked_dimensions.json", "final_labels.json", "analysis_summary.json"])
+            update_project(project_id, {"stage": "dimension_draft_ready"})
+            send_json(self, {"status": "ok", "message": "已解除锁定。最终打标和分析结果已归档，因为它们依赖旧规则。", "stats": project_stats(project_id)})
+            return
+
+        m = re.match(r"^/api/projects/([^/]+)/analysis$", path)
+        if m:
+            project_id = m.group(1)
+            if not get_project(project_id):
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            final_labels = read_json(project_dir(project_id) / "final_labels.json", [])
+            if not final_labels:
+                send_json(self, {"error": "missing_final_labels", "detail": "请先完成第 6 步最终打标，再生成细分维度和优化切入口。"}, 400)
+                return
+            summary = build_analysis_summary(project_id)
+            send_json(self, {"status": "ok", "analysis_summary": summary, "stats": project_stats(project_id)})
             return
 
         m = re.match(r"^/api/projects/([^/]+)/batches/([^/]+)/extract-atomic$", path)
