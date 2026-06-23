@@ -187,8 +187,45 @@ def login_page():
 </html>"""
 
 
+HEADER_SCAN_ROWS = 20
+TEXT_SAMPLE_ROWS = 80
+
+ID_HEADERS = ["Review序号", "序号", "review_id", "ReviewID", "review id", "id", "评论ID", "评价ID"]
+TITLE_HEADERS = ["标题", "title", "review_title", "review title", "reviewtitle", "评论标题", "评价标题"]
+BODY_HEADERS = [
+    "正文",
+    "review原文",
+    "review 原文",
+    "review",
+    "review body",
+    "review text",
+    "review_body",
+    "review_text",
+    "reviewbody",
+    "reviewtext",
+    "body",
+    "content",
+    "reviewcontent",
+    "评论内容",
+    "评论正文",
+    "评论原文",
+    "评价内容",
+    "评价正文",
+    "英文原文",
+    "英文review",
+    "review英文原文",
+    "客户评论",
+]
+CN_HEADERS = ["Review中文翻译", "review-中文翻译", "review 中文翻译", "中文翻译", "translation", "review translation"]
+STAR_HEADERS = ["星级", "rating", "ratings", "stars", "star rating", "score", "评分"]
+ASIN_HEADERS = ["ASIN", "asin"]
+MODEL_HEADERS = ["型号", "变体", "variant", "variation", "model", "产品型号", "variant name", "sku"]
+LINK_HEADERS = ["Review链接", "链接", "reviewlink", "review link", "review_url", "review url", "url", "permalink"]
+
+
 def normalize_header(value) -> str:
-    return str(value or "").strip().lower().replace(" ", "").replace("_", "")
+    text = str(value or "").strip().lower()
+    return re.sub(r"[\s_\-:/\\|,.;()（）【】\[\]{}<>]+", "", text)
 
 
 def find_header(headers, candidates):
@@ -202,22 +239,25 @@ def find_header(headers, candidates):
 
 def parse_reviews_from_xlsx(data: bytes):
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return []
-    headers = [str(x or "").strip() for x in rows[0]]
-    return rows_to_reviews(headers, rows[1:])
+    best_reviews = []
+    best_info = {"file_type": "xlsx", "sheets": [ws.title for ws in wb.worksheets]}
+    best_score = -1
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        reviews, info, score = parse_table_rows(rows, {"file_type": "xlsx", "sheet": ws.title})
+        if score > best_score or (score == best_score and len(reviews) > len(best_reviews)):
+            best_reviews = reviews
+            best_info = info
+            best_score = score
+    return best_reviews, best_info
 
 
 def parse_reviews_from_csv(data: bytes):
     text = data.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
     rows = list(reader)
-    if not rows:
-        return []
-    headers = [str(x or "").strip() for x in rows[0]]
-    return rows_to_reviews(headers, rows[1:])
+    reviews, info, _score = parse_table_rows(rows, {"file_type": "csv"})
+    return reviews, info
 
 
 def cell(row, idx):
@@ -226,15 +266,119 @@ def cell(row, idx):
     return str(row[idx] or "").strip()
 
 
-def rows_to_reviews(headers, data_rows):
-    id_idx = find_header(headers, ["Review序号", "序号", "review_id", "ReviewID", "id"])
-    title_idx = find_header(headers, ["标题", "title", "review_title"])
-    body_idx = find_header(headers, ["正文", "review原文", "review", "body", "content", "reviewcontent", "评论内容"])
-    cn_idx = find_header(headers, ["Review中文翻译", "review-中文翻译", "中文翻译", "translation"])
-    star_idx = find_header(headers, ["星级", "rating", "stars", "score"])
-    asin_idx = find_header(headers, ["ASIN", "asin"])
-    model_idx = find_header(headers, ["型号", "变体", "variant", "model", "产品型号"])
-    link_idx = find_header(headers, ["Review链接", "链接", "reviewlink", "url"])
+def parse_table_rows(rows, base_info):
+    if not rows:
+        return [], {**base_info, "message": "文件里没有可读取的行"}, 0
+
+    best_reviews = []
+    best_info = {**base_info, "message": "没有识别到 Review 正文列"}
+    best_score = -1
+    limit = min(len(rows), HEADER_SCAN_ROWS)
+    for header_idx in range(limit):
+        headers = [str(x or "").strip() for x in rows[header_idx]]
+        if not any(headers):
+            continue
+        data_rows = rows[header_idx + 1 :]
+        explicit_score = header_match_score(headers)
+        inferred_body_idx = None
+        if find_header(headers, BODY_HEADERS) is None and find_header(headers, TITLE_HEADERS) is None:
+            inferred_body_idx = infer_body_column(headers, data_rows)
+        reviews = rows_to_reviews(headers, data_rows, inferred_body_idx)
+        if not reviews:
+            continue
+        score = explicit_score * 1000 + min(len(reviews), 999)
+        if inferred_body_idx is not None:
+            score += 100
+        if score > best_score or (score == best_score and len(reviews) > len(best_reviews)):
+            best_reviews = reviews
+            best_info = {
+                **base_info,
+                "header_row": header_idx + 1,
+                "headers_preview": [h for h in headers if h][:20],
+                "detected_columns": detected_columns(headers, data_rows, inferred_body_idx),
+                "body_column_was_inferred": inferred_body_idx is not None,
+            }
+            best_score = score
+    return best_reviews, best_info, max(best_score, 0)
+
+
+def header_match_score(headers):
+    score = 0
+    if find_header(headers, BODY_HEADERS) is not None:
+        score += 10
+    if find_header(headers, TITLE_HEADERS) is not None:
+        score += 4
+    if find_header(headers, ID_HEADERS) is not None:
+        score += 2
+    if find_header(headers, STAR_HEADERS) is not None:
+        score += 1
+    if find_header(headers, MODEL_HEADERS) is not None:
+        score += 1
+    return score
+
+
+def infer_body_column(headers, data_rows):
+    candidates = []
+    max_cols = max([len(headers)] + [len(r) for r in data_rows[:TEXT_SAMPLE_ROWS]] or [0])
+    for idx in range(max_cols):
+        header = normalize_header(headers[idx] if idx < len(headers) else "")
+        if header in {normalize_header(x) for x in ID_HEADERS + STAR_HEADERS + ASIN_HEADERS + MODEL_HEADERS + LINK_HEADERS}:
+            continue
+        values = [cell(row, idx) for row in data_rows[:TEXT_SAMPLE_ROWS] if cell(row, idx)]
+        if len(values) < 2:
+            continue
+        numeric_like = sum(1 for value in values if re.fullmatch(r"[\d.]+", value))
+        url_like = sum(1 for value in values if value.startswith(("http://", "https://")))
+        if numeric_like >= len(values) * 0.7 or url_like >= len(values) * 0.5:
+            continue
+        long_values = [value for value in values if len(value) >= 20]
+        language_values = [value for value in values if re.search(r"[A-Za-z]{3,}|[\u4e00-\u9fff]{2,}", value)]
+        if len(long_values) < 2 or len(language_values) < 2:
+            continue
+        avg_len = sum(len(value) for value in values) / len(values)
+        max_len = max(len(value) for value in values)
+        score = len(long_values) * 10 + avg_len + max_len / 5
+        candidates.append((score, idx))
+    candidates.sort(reverse=True)
+    if not candidates:
+        return None
+    if len(candidates) == 1 or candidates[0][0] >= candidates[1][0] * 1.2:
+        return candidates[0][1]
+    return None
+
+
+def review_column_indexes(headers, data_rows, inferred_body_idx=None):
+    body_idx = find_header(headers, BODY_HEADERS)
+    return {
+        "review_id": find_header(headers, ID_HEADERS),
+        "title": find_header(headers, TITLE_HEADERS),
+        "body": body_idx if body_idx is not None else inferred_body_idx,
+        "translation_zh": find_header(headers, CN_HEADERS),
+        "star": find_header(headers, STAR_HEADERS),
+        "asin": find_header(headers, ASIN_HEADERS),
+        "model": find_header(headers, MODEL_HEADERS),
+        "link": find_header(headers, LINK_HEADERS),
+    }
+
+
+def detected_columns(headers, data_rows, inferred_body_idx=None):
+    indexes = review_column_indexes(headers, data_rows, inferred_body_idx)
+    result = {}
+    for key, idx in indexes.items():
+        result[key] = headers[idx] if idx is not None and idx < len(headers) else ""
+    return result
+
+
+def rows_to_reviews(headers, data_rows, inferred_body_idx=None):
+    indexes = review_column_indexes(headers, data_rows, inferred_body_idx)
+    id_idx = indexes["review_id"]
+    title_idx = indexes["title"]
+    body_idx = indexes["body"]
+    cn_idx = indexes["translation_zh"]
+    star_idx = indexes["star"]
+    asin_idx = indexes["asin"]
+    model_idx = indexes["model"]
+    link_idx = indexes["link"]
 
     reviews = []
     for n, row in enumerate(data_rows, start=1):
@@ -1071,15 +1215,26 @@ class Handler(SimpleHTTPRequestHandler):
             raw = file_item.file.read()
             name = file_item.filename.lower()
             if name.endswith(".xlsx"):
-                reviews = parse_reviews_from_xlsx(raw)
+                reviews, parse_info = parse_reviews_from_xlsx(raw)
             elif name.endswith(".csv"):
-                reviews = parse_reviews_from_csv(raw)
+                reviews, parse_info = parse_reviews_from_csv(raw)
             else:
                 send_json(self, {"error": "unsupported_file_type"}, 400)
                 return
+            if not reviews:
+                send_json(
+                    self,
+                    {
+                        "error": "no_reviews_recognized",
+                        "detail": "没有识别到 Review。请确认文件里有“Review原文 / 正文 / Review Body / Review Text / 评论内容”等正文列，或至少有一列包含完整评论文本。",
+                        "parse_info": parse_info,
+                    },
+                    400,
+                )
+                return
             write_json(project_dir(project_id) / "reviews.json", reviews)
             project = update_project(project_id, {"stage": "reviews_imported"})
-            send_json(self, {"project": project, "stats": project_stats(project_id), "sample": reviews[:5]})
+            send_json(self, {"project": project, "stats": project_stats(project_id), "sample": reviews[:5], "parse_info": parse_info})
             return
 
         m = re.match(r"^/api/projects/([^/]+)/batches$", path)
