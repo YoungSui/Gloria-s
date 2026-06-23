@@ -22,6 +22,10 @@ function apiKey() {
   return localStorage.getItem("deepseek_api_key") || "";
 }
 
+function clientApiKey() {
+  return state.config?.has_deepseek_key ? "" : apiKey();
+}
+
 function setApiKey(value) {
   localStorage.setItem("deepseek_api_key", value || "");
   renderApiKeyStatus();
@@ -156,8 +160,12 @@ function renderApiKeyStatus() {
   const mock = Boolean($("mockRun")?.checked);
   const el = $("apiKeyStatus");
   if (!el) return;
+  if (state.config?.has_deepseek_key && apiKey()) {
+    localStorage.removeItem("deepseek_api_key");
+    $("apiKey").value = "";
+  }
   $("apiKey").disabled = Boolean(state.config?.has_deepseek_key);
-  $("apiKey").placeholder = state.config?.has_deepseek_key ? "服务端已配置，不需要填写" : "服务端未配置时再临时粘贴";
+  $("apiKey").placeholder = state.config?.has_deepseek_key ? "服务端已配置，不会使用浏览器旧 Key" : "服务端未配置时再临时粘贴";
   el.textContent = state.config?.has_deepseek_key ? "已接入服务端 API" : mock ? "模拟运行已开启" : ready ? "已填写临时 Key" : "未填写";
   el.className = `step-state ${ready ? "done" : "wait"}`;
 }
@@ -417,7 +425,7 @@ async function makeBatches(options = {}) {
 
 async function runBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
-  const key = apiKey();
+  const key = clientApiKey();
   const mock = $("mockRun").checked;
   if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const btn = document.querySelector(`.run-batch[data-batch="${batchId}"]`);
@@ -440,7 +448,7 @@ async function runBatch(batchId, options = {}) {
 
 async function runFinalBatch(batchId, options = {}) {
   if (!state.currentProjectId) throw new Error("请先选择项目");
-  const key = apiKey();
+  const key = clientApiKey();
   const mock = $("mockRun").checked;
   if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const btn = document.querySelector(`.final-batch[data-batch="${batchId}"]`);
@@ -463,7 +471,7 @@ async function runFinalBatch(batchId, options = {}) {
 
 async function proposeDimensions() {
   if (!state.currentProjectId) throw new Error("请先选择项目");
-  const key = apiKey();
+  const key = clientApiKey();
   const mock = $("mockRun").checked;
   if (!mock && !key && !state.config?.has_deepseek_key) throw new Error("服务端还没有接入 DeepSeek API Key，请先配置或临时填写 Key");
   const data = await request(`/api/projects/${state.currentProjectId}/propose-dimensions`, {
@@ -545,5 +553,9 @@ function bindEvents() {
   $("saveDimensionsBtn").addEventListener("click", () => saveDimensions().catch(showLog));
 }
 
-bindEvents();
-loadProjects().catch(showLog);
+if (location.protocol === "file:") {
+  location.replace("https://voc-semantic-labeler.onrender.com/");
+} else {
+  bindEvents();
+  loadProjects().catch(showLog);
+}
