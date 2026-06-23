@@ -559,7 +559,7 @@ def extract_json_from_text(text: str):
         raise
 
 
-def deepseek_chat(api_key: str, model: str, messages: list[dict], max_tokens=12000, temperature=0.1):
+def deepseek_chat(api_key: str, model: str, messages: list[dict], max_tokens=12000, temperature=0.1, timeout=240):
     payload = {
         "model": model,
         "messages": messages,
@@ -577,7 +577,7 @@ def deepseek_chat(api_key: str, model: str, messages: list[dict], max_tokens=120
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=240) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -602,6 +602,7 @@ def atomic_prompt(project: dict, reviews: list[dict]) -> list[dict]:
         "task": "extract_atomic_tags",
         "requirements": [
             "逐条完整阅读 review_original。",
+            "同时输出 review_translation_zh：忠实、完整、自然的中文全文翻译；不要使用已有劣质翻译。",
             "一条 review 可以拆多个 atomic_tags。",
             "atomic_tag_zh 必须是中文短句；品牌、型号、缩写、专有名词可保留英文。",
             "evidence_original 必须是原文短证据，不要整段复制。",
@@ -614,6 +615,7 @@ def atomic_prompt(project: dict, reviews: list[dict]) -> list[dict]:
             "reviews": [
                 {
                     "review_id": "string",
+                    "review_translation_zh": "string",
                     "atomic_tags": [
                         {
                             "atomic_tag_zh": "string",
@@ -661,6 +663,8 @@ def validate_atomic_result(result: dict, expected_ids: set[str]):
         seen.add(rid)
         if rid not in expected_ids:
             errors.append(f"unexpected review_id {rid}")
+        if not str(item.get("review_translation_zh", "")).strip():
+            errors.append(f"{rid}: empty review_translation_zh")
         for tag in item.get("atomic_tags", []) or []:
             if not tag.get("atomic_tag_zh"):
                 errors.append(f"{rid}: empty atomic_tag_zh")
@@ -709,6 +713,7 @@ def mock_atomic_extract(reviews: list[dict]):
         rows.append(
             {
                 "review_id": r["review_id"],
+                "review_translation_zh": f"模拟翻译：{text[:300]}",
                 "atomic_tags": tags,
                 "drop_records": drops,
                 "review_flags": ["模拟运行结果，不作为正式打标"] if tags or drops else ["未识别出高置信最小语义标签"],
@@ -729,7 +734,28 @@ def merge_atomic_results(project_id: str, batch_id: str, result: dict, usage: di
         item["usage"] = usage
         existing.append(item)
     write_json(path, existing)
+    merge_review_translations(project_id, result.get("reviews", []))
     reset_after_atomic_change(project_id)
+
+
+def merge_review_translations(project_id: str, rows: list[dict]) -> None:
+    path = project_dir(project_id) / "reviews.json"
+    reviews = read_json(path, [])
+    translations = {
+        str(row.get("review_id", "")).strip(): str(row.get("review_translation_zh", "")).strip()
+        for row in rows
+        if str(row.get("review_translation_zh", "")).strip()
+    }
+    if not translations:
+        return
+    changed = False
+    for review in reviews:
+        rid = str(review.get("review_id", "")).strip()
+        if rid in translations:
+            review["review_translation_zh"] = translations[rid]
+            changed = True
+    if changed:
+        write_json(path, reviews)
 
 
 def propose_dimensions(project_id: str):
@@ -757,17 +783,32 @@ def propose_dimensions(project_id: str):
 
 def dimension_model_prompt(project: dict, candidates: dict, atomic: list[dict]) -> list[dict]:
     compact_atomic = []
-    for row in atomic[:350]:
-        for tag in (row.get("atomic_tags", []) or [])[:8]:
+    candidate_tags = {
+        item.get("atomic_tag", "")
+        for item in (candidates.get("product_atomic_pool", [])[:80] + candidates.get("context_atomic_pool", [])[:80])
+    }
+    seen_tags = set()
+    for row in atomic:
+        for tag in (row.get("atomic_tags", []) or []):
+            tag_text = tag.get("atomic_tag_zh", "")
+            if tag_text not in candidate_tags and len(compact_atomic) >= 80:
+                continue
+            if tag_text in seen_tags and len(compact_atomic) >= 120:
+                continue
             compact_atomic.append(
                 {
                     "review_id": row.get("review_id", ""),
-                    "atomic_tag_zh": tag.get("atomic_tag_zh", ""),
+                    "atomic_tag_zh": tag_text,
                     "sentiment": tag.get("sentiment", ""),
                     "usage_marks": tag.get("usage_marks", []),
                     "evidence_original": tag.get("evidence_original", ""),
                 }
             )
+            seen_tags.add(tag_text)
+            if len(compact_atomic) >= 180:
+                break
+        if len(compact_atomic) >= 180:
+            break
     task = {
         "task": "build_dimension_draft_from_atomic_tags",
         "product": {
@@ -779,6 +820,7 @@ def dimension_model_prompt(project: dict, candidates: dict, atomic: list[dict]) 
         "atomic_evidence_sample": compact_atomic,
         "requirements": [
             "不要按关键词机械聚类，要理解最小语义标签背后的购买决策问题。",
+            "优先基于候选池和代表证据建立维度，不要逐条复述样本。",
             "产品购买决策维度必须是买家会用来判断是否购买/留下/退货的一级问题。",
             "Context 字段必须是人群、场景、用途、购买路径、使用阻碍等背景信息，不要混入产品性能。",
             "维度数量不要过多。产品购买决策维度建议 6-10 个，Context 字段建议 8-14 个。",
@@ -862,7 +904,7 @@ def generate_dimension_model(project_id: str, api_key: str, model: str, mock: bo
     if mock:
         draft, usage = mock_dimension_model(candidates), {"mock": True}
     else:
-        draft, usage = deepseek_chat(api_key, model, dimension_model_prompt(project, candidates, atomic), max_tokens=16000, temperature=0.15)
+        draft, usage = deepseek_chat(api_key, model, dimension_model_prompt(project, candidates, atomic), max_tokens=10000, temperature=0.12, timeout=360)
     draft["model"] = model
     draft["usage"] = usage
     draft["generated_at"] = now_iso()
@@ -1548,6 +1590,24 @@ class Handler(SimpleHTTPRequestHandler):
                     "analysis_summary": read_json(project_dir(project_id) / "analysis_summary.json", {}),
                 },
             )
+            return
+        m = re.match(r"^/api/projects/([^/]+)/reviews$", path)
+        if m:
+            project_id = m.group(1)
+            if not get_project(project_id):
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            reviews = read_json(project_dir(project_id) / "reviews.json", [])
+            send_json(self, {"reviews": reviews, "count": len(reviews)})
+            return
+        m = re.match(r"^/api/projects/([^/]+)/atomic-results$", path)
+        if m:
+            project_id = m.group(1)
+            if not get_project(project_id):
+                send_json(self, {"error": "project_not_found"}, 404)
+                return
+            rows = read_json(project_dir(project_id) / "atomic_results.json", [])
+            send_json(self, {"atomic_results": rows, "count": len(rows)})
             return
         m = re.match(r"^/api/projects/([^/]+)/export$", path)
         if m:
