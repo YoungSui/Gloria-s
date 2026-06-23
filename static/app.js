@@ -44,14 +44,25 @@ async function request(path, options = {}) {
   const contentType = res.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) {
-    const message = data && data.detail ? data.detail : data.error || `HTTP ${res.status}`;
+    let message = `HTTP ${res.status}`;
+    if (typeof data === "string" && data.trim()) {
+      message = data.trim();
+    } else if (data && typeof data === "object") {
+      message = data.detail || data.error || data.message || JSON.stringify(data, null, 2);
+    }
     throw new Error(message);
   }
   return data;
 }
 
 function showLog(value) {
-  $("logText").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (value instanceof Error) {
+    $("logText").textContent = value.message || "发生未知错误";
+  } else if (typeof value === "string") {
+    $("logText").textContent = value;
+  } else {
+    $("logText").textContent = JSON.stringify(value, null, 2);
+  }
   $("logDialog").showModal();
 }
 
@@ -406,13 +417,42 @@ async function uploadReviews() {
   const form = new FormData();
   form.append("file", file);
   const data = await request(`/api/projects/${state.currentProjectId}/reviews`, { method: "POST", body: form });
+  const parseInfoHtml = formatParseInfo(data.parse_info);
   $("uploadPreview").innerHTML = `
     <div class="hint">已导入 ${formatNum(data.stats.reviews)} 条评论。系统正在自动准备后台任务，不需要手动分组。</div>
+    ${parseInfoHtml}
     ${(data.sample || []).map((r) => `<div class="tag-row"><strong>${escapeHtml(r.review_id)}</strong><small>${escapeHtml((r.review_original || "").slice(0, 160))}</small></div>`).join("")}
   `;
   await request(`/api/projects/${state.currentProjectId}/batches`, { method: "POST", json: { batch_size: Number($("batchSize").value || 25) } });
   await loadProjects();
   document.getElementById("stepAtomic").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function formatParseInfo(info) {
+  if (!info) return "";
+  const source = [
+    info.sheet ? `工作表：${info.sheet}` : "",
+    info.header_row ? `表头行：第 ${info.header_row} 行` : "",
+    info.body_column_was_inferred ? "正文列：按内容自动推断" : "",
+  ].filter(Boolean).join("；");
+  const labels = {
+    review_id: "序号/ID",
+    title: "标题",
+    body: "正文",
+    translation_zh: "中文翻译",
+    star: "星级",
+    asin: "ASIN",
+    model: "型号/变体",
+    link: "链接",
+  };
+  const columns = Object.entries(info.detected_columns || {})
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${labels[key] || key}: ${value}`)
+    .join("；");
+  return `
+    <div class="hint">识别信息：${escapeHtml(source || "未返回")}</div>
+    ${columns ? `<div class="hint">识别列：${escapeHtml(columns)}</div>` : ""}
+  `;
 }
 
 async function makeBatches(options = {}) {
