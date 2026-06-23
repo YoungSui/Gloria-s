@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>VOC 语义打标工具</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260623-job-tabs" />
   </head>
   <body>
     <div class="app">
@@ -116,14 +116,15 @@
           </div>
           <div class="form-grid two">
             <label>
-              快速模型，用于最小语义标签
+              批量模型：最小语义 + 最终打标
               <input id="fastModel" value="deepseek-v4-flash" />
             </label>
             <label>
-              高质量模型，用于维度和最终打标
+              高质量模型：维度草案/规则归纳
               <input id="accurateModel" value="deepseek-v4-pro" />
             </label>
           </div>
+          <p class="hint">默认费用策略：大批量逐条阅读和最终打标用 Flash；维度草案这种少量归纳任务用 Pro。</p>
           <label>
             品类背景和误判边界
             <textarea id="projectDescription" rows="4" placeholder="例如：产品形态、核心场景、不要把售后/物流/包装误判成产品性能"></textarea>
@@ -281,6 +282,7 @@
           <div class="action-row">
             <button id="runAllFinalBtn" class="primary">最终打标全部待处理批次</button>
             <a id="exportLinkBottom" class="button ghost disabled" href="#">下载最终 Excel</a>
+            <span class="hint">默认用批量模型逐批处理，低置信和边界冲突会进入 NeedReview。</span>
           </div>
           <div id="finalStatus" class="local-run-status idle">当前未处理</div>
           <section class="inline-review-section">
@@ -314,6 +316,6 @@
       <button onclick="document.getElementById('logDialog').close()">关闭</button>
     </dialog>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260623-job-tabs"></script>
   </body>
 </html>
